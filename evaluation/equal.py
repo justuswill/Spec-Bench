@@ -59,13 +59,13 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--jsonfile1",
-        default='vicuna-7b-v1.3-vanilla-float32-temp-0.0.jsonl',
+        default='vicuna-7b-v1.3-vanilla-float16-temp-0.0.jsonl',
         type=str,
         help="The file name of the first evaluated method.",
     )
     parser.add_argument(
         "--jsonfile2",
-        default='vicuna-7b-v1.3-sps-68m-float32-temp-0.0.jsonl',
+        default='vicuna-7b-v1.3-eagle2-float16-temperature-0.0.jsonl',
         type=str,
         help="The file name of the second evaluated method.",
     )

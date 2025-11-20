@@ -125,26 +125,26 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--file-path",
-        default='./data/spec_bench/model_answer/vicuna-7b-v1.3-samd.jsonl',
+        default='../data/spec_bench/model_answer/vicuna-7b-v1.3-ptp.jsonl',
         type=str,
         help="The file path of evaluated Speculative Decoding methods.",
     )
     parser.add_argument(
         "--base-path",
-        default='./data/spec_bench/model_answer/vicuna-7b-v1.3-vanilla-float16-temp-0.0.jsonl',
+        default='../data/spec_bench/model_answer/vicuna-7b-v1.3-vanilla-float16-temp-0.0.jsonl',
         type=str,
         help="The file path of evaluated baseline.",
     )
     parser.add_argument(
         "--tokenizer-path",
-        default='/home/xiaheming/data/pretrained_models/Vicuna/vicuna-7b-v1.3',
+        default='/extra/ucibdl1/jcwill/specbench/models/vicuna-7b-v1.3',
         type=str,
         help="The file path of evaluated baseline.",
     )
     parser.add_argument(
         "--mean-report",
         action="store_true",
-        default=True,
+        default=False,
         help="report mean speedup over different runs")
 
     args = parser.parse_args()
