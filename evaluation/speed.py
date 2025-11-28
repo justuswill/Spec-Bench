@@ -125,13 +125,13 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--file-path",
-        default='../data/spec_bench/model_answer/vicuna-7b-v1.3-ptp.jsonl',
+        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-float16-temp-0.7-lorag8.jsonl',
         type=str,
         help="The file path of evaluated Speculative Decoding methods.",
     )
     parser.add_argument(
         "--base-path",
-        default='../data/spec_bench/model_answer/vicuna-7b-v1.3-vanilla-float16-temp-0.0.jsonl',
+        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-vanilla-float16-temp-0.7.jsonl',
         type=str,
         help="The file path of evaluated baseline.",
     )

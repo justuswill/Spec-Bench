@@ -3,6 +3,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.checkpoint import checkpoint
 import torch.nn as nn
 
+
 class CustomCheckpointWrapper(nn.Module):
     def __init__(self, layer, use_reentrant: bool = False, preserve_rng_state: bool = True):
         super().__init__()
@@ -44,7 +45,8 @@ def enable_custom_checkpointing(model, every_n: int = 3, start_index: int = 0,
 
     # You may need to change this path depending on the HF architecture you use.
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
-        raise AttributeError("Could not find 'model.model.layers'. Adjust enable_custom_checkpointing() for your model arch.")
+        raise AttributeError(
+            "Could not find 'model.model.layers'. Adjust enable_custom_checkpointing() for your model arch.")
 
     layers = model.model.layers
     wrapped = 0
@@ -58,9 +60,10 @@ def enable_custom_checkpointing(model, every_n: int = 3, start_index: int = 0,
             wrapped += 1
     return wrapped
 
+
 class TransformerModel(torch.nn.Module):
     def __init__(self, model_id, reset_parameters=False, dtype: torch.dtype | str = torch.float32,
-                 use_gradient_checkpointing: bool = False, **kwargs):
+                 use_gradient_checkpointing: bool = False, lora_config=None, **kwargs):
         super().__init__()
         # Convert string dtype to torch dtype
         if isinstance(dtype, str):
@@ -80,7 +83,18 @@ class TransformerModel(torch.nn.Module):
         if use_gradient_checkpointing:
             print("Enabling gradient checkpointing")
             self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        #print how many layers there are in the model
+
+        if lora_config is not None:
+            from peft import get_peft_model, LoraConfig, TaskType
+            print("Applying LoRA adapters")
+            peft_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=False,
+                **lora_config
+            )
+            self.model = get_peft_model(self.model, peft_config)
+
+        # print how many layers there are in the model
         # print(f"Number of layers in the model: {len(self.model.model.layers)}")
         # if use_gradient_checkpointing:
         #     wrapped = enable_custom_checkpointing(
@@ -98,7 +112,7 @@ class TransformerModel(torch.nn.Module):
 
     def generate(self, *args, **kwargs):
         return self.model.generate(*args, **kwargs)
-    
+
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
@@ -133,13 +147,37 @@ class SawtoothFloatEmbedding(torch.nn.Module):
         return self.embedding(bin_positions)
 
 
+class QuarterCosEmbedding(torch.nn.Module):
+    def __init__(self, embedding_dim, num_frequencies=32):
+        super().__init__()
+        self.frequencies = torch.arange(1, num_frequencies + 1).float()
+        assert self.frequencies.shape == (num_frequencies,), f"{self.frequencies.shape} != {(num_frequencies,)}"
+        self.embedding = torch.nn.Linear(num_frequencies, embedding_dim)
+
+    def forward(self, u):
+        # u is (batch_size, seq_len)
+        u = torch.clamp(u, 0.0, 1.0)
+        u = u.unsqueeze(-1)  # (batch_size, seq_len, 1)
+        # (batch_size, seq_len, num_frequencies)
+        cos_features = torch.cos(self.frequencies.to(u.device)[None, None, :] * torch.pi * u)
+        return self.embedding(cos_features)
+
+
 class MixedTransformerModel(TransformerModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, shift_positions: bool = False, adapter_name="binary", *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.u_adapter = BinaryFloatEmbedding(self.model.config.hidden_size)
+        if adapter_name == "sawtooth":
+            adapter_class = SawtoothFloatEmbedding
+        elif adapter_name == "quarter_cos":
+            adapter_class = QuarterCosEmbedding
+        elif adapter_name == "binary":
+            adapter_class = BinaryFloatEmbedding
+        else:
+            raise ValueError(f"Unknown adapter_name {adapter_name}")
+        self.u_adapter = adapter_class(self.model.config.hidden_size)
+        self.shift_positions = shift_positions
 
-
-    def forward(self, input_ids: torch.LongTensor, auxiliaries: torch.FloatTensor, **kwargs):
+    def forward(self, input_ids: torch.LongTensor, auxiliaries: torch.FloatTensor, attention_mask=None, **kwargs):
         # input_embeds = self.model.model.embed_tokens(input_ids)
         input_embeds = self.model.get_input_embeddings()(input_ids)
         auxiliary_embeds = self.u_adapter(auxiliaries)
@@ -148,4 +186,17 @@ class MixedTransformerModel(TransformerModel):
             input_embeds,
             auxiliary_embeds
         ], dim=1)
+        if self.shift_positions:
+            assert 'position_ids' not in kwargs, "Cannot use both shift_positions and custom position_ids"
+            if attention_mask is None:
+                attention_mask = torch.ones(
+                    all_embeds.shape[0], all_embeds.shape[1],
+                    device=input_ids.device, dtype=torch.bool
+                )
+            position_ids = attention_mask.cumsum(dim=1) - 1
+            # First auxiliary prediction overlaps with last input token
+            position_ids[:, input_embeds.shape[-2]:] -= 1
+            kwargs['position_ids'] = position_ids
+        # return self.model(inputs_embeds=all_embeds, attention_mask=attention_mask, **kwargs)
+        # return self.model(inputs_embeds=all_embeds, attention_mask=attention_mask, **kwargs)
         return self.model(inputs_embeds=all_embeds, **kwargs)

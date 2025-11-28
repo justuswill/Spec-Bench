@@ -127,7 +127,7 @@ class ParallelSamplingLightningModule(LightningModule):
         self._log_metrics('val', metrics_logged, sync_dist=True)
 
     @torch.inference_mode()
-    def timed_error_correction(self, batch, tokens_to_fill, kvcaches=True, eos=None):
+    def timed_error_correction(self, batch, tokens_to_fill, kvcaches=False, eos=None):
         assert batch['prompt_ids'].shape[0] == 1, "Batch size must be 1 for now"
 
         # This would be faster using completion_ids and bin_edges but we want to measure the verification call.
@@ -179,7 +179,7 @@ class ParallelSamplingLightningModule(LightningModule):
                     # ------
                     # O-PTP
                     # ------
-                    student_logits = full_logits[:, -ths_n_prop:]
+                    student_logits = full_logits[:, -ths_n_prop+1:]
                     student_predicted = student_logits.argmax(dim=2)
                     student_completion = torch.cat([
                         prompt_ids,
@@ -205,14 +205,14 @@ class ParallelSamplingLightningModule(LightningModule):
                     # attention_mask=prompt_mask,
                 )
 
-            tgt_logits = outputs.logits[..., - n_prop - 1:, :]
+            tgt_logits = outputs.logits[..., - n_prop:, :]
             tgt_logits = self.adapt_logits(tgt_logits)
             # ? assert logits.dtype == torch.float32, logits.dtype
             right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
-            correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+            correct_tokens = (right_bin_edges > z_rnd[..., :-1, None]).max(dim=-1).indices
             if self.student_calls_per_step >= 1:
                 check_tokens = correct_tokens[..., :-1]
-                predict_tokens = prompt_ids[..., - n_prop:]
+                predict_tokens = prompt_ids[..., - n_prop+1:]
                 num_correct = (check_tokens == predict_tokens).float().argmin(dim=1)
                 num_correct[(check_tokens == predict_tokens).all(dim=1)] = n_prop
                 num_correct = int(num_correct.float().mean())

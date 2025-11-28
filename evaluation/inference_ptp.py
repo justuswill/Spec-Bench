@@ -6,28 +6,70 @@ python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fa
 import argparse
 
 from evaluation.eval import run_eval, reorg_answer_file
-
 from fastchat.utils import str_to_torch_dtype
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from model.ptp.lit import ParallelSamplingLightningModule
 from model.ptp.utils import instantiate
 import os
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 import yaml
-import lightning.pytorch
 import torch
 
-def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temperature=0.0):
-    model.temperature = temperature
-    if not list(model.teacher.parameters())[0].device.type == 'cuda':
-        model.to('cuda')
+def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temperature=0.0, prepare=False):
+    # if not list(model.teacher.parameters())[0].device.type == 'cuda':
+    #     model.to('cuda')
+    if prepare:
+        return
+        # outputs = model.teacher.generate(
+        #     input_ids=inputs.input_ids,
+        #     max_new_tokens=max_new_tokens,
+        #     do_sample=True,
+        #     # pad_token_id=tokenizer.eos_token_id,
+        #     temperature=temperature,
+        #     top_p=model.top_p,
+        #     top_k=model.top_k,
+        #     output_scores=True,
+        #     return_dict_in_generate=True,
+        #     num_return_sequences=1,
+        #     use_cache=True,
+        # )
+        # chunk_ids = outputs.sequences[:, inputs.input_ids.shape[1]:]
+        # scores = torch.stack(outputs.scores, dim=1)
+        # probs = torch.softmax(scores, dim=-1)
+        # selector = (
+        #     torch.arange(probs.shape[0], device=probs.device)[:, None],
+        #     torch.arange(probs.shape[1], device=probs.device)[None, :],
+        #     chunk_ids
+        # )
+        # assert (probs[selector] > 0).all(), "Some token has zero probability"
+        # cum_probs = probs.cumsum(-1)
+        #
+        # model.prep_completion_ids = chunk_ids
+        # model.prep_left_bin_edges = cum_probs[selector] - probs[selector]
+        # model.prep_right_bin_edges = cum_probs[selector]
+        # return
+    else:
+        model.temperature = temperature
 
-    metrics = model.timed_error_correction({'prompt_ids': inputs.input_ids}, tokens_to_fill=max_new_tokens, eos=tokenizer.eos_token_id)
-    output_ids = metrics['completion']
-    step = metrics['num_calls']
-    accept_length_list = metrics['all_correct']
-    new_token = sum(accept_length_list)
+        # input_ids = torch.tensor(tokenizer.encode("A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.\nUSER: How can cross training benefit groups like runners, swimmers, or weightlifters?\nASSISTANT: "))[None, :].to('cuda')
+        # import time
+        # s = time.time()
+        # metrics = model.timed_error_correction({'prompt_ids': input_ids}, tokens_to_fill=max_new_tokens, eos=tokenizer.eos_token_id)
+        metrics = model.generate(
+            {'prompt_ids': inputs.input_ids,
+             # 'completion_ids': model.prep_completion_ids,'left_bin_edges':model.prep_left_bin_edges, 'right_bin_edges':model.prep_right_bin_edges
+             },
+            max_new_tokens=max_new_tokens, error_correction=True, return_metrics=True, eos=tokenizer.eos_token_id)[1]
+        output_ids = metrics['completion']
+        step = metrics['num_calls']
+        accept_length_list = metrics['correct_all']
+        new_token = sum(accept_length_list)
+
+        # model.prep_completion_ids = None
+        # model.prep_left_bin_edges = None
+        # model.prep_right_bin_edges = None
+
+        # torch.cuda.synchronize()
+        # print(time.time() - s)
 
     return output_ids, new_token, step, accept_length_list
 
@@ -102,22 +144,27 @@ if __name__ == "__main__":
     if args.answer_file:
         answer_file = args.answer_file
     else:
-        answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}.jsonl"
+        answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}-float16-temp-0.7-lora64.jsonl"
 
     print(f"Output to {answer_file}")
 
-    with open(os.path.join(args.student_path, 'validate.yaml'), 'r') as f:
+    with open(os.path.join(args.student_path, 'validate_spec.yaml'), 'r') as f:
         config = DictConfig(yaml.safe_load(f))
     torch.set_float32_matmul_precision('medium')
 
     lit_model = instantiate(config['model'])
-    ckpt = torch.load(os.path.join(args.student_path, 'last-farrin.ckpt'), map_location='cuda')
-    lit_model.load_state_dict(ckpt['state_dict'], strict=False)
+    # ckpt = torch.load(os.path.join(args.student_path, 'last-farrin.ckpt'), map_location='cuda')
+    ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r64/epoch=86.ckpt'), map_location='cuda')
+    # ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r8/gated/epoch=9.ckpt'), map_location='cuda')
+    mistakes = lit_model.load_state_dict(ckpt['state_dict'], strict=False)
+    assert all(key.startswith("teacher") for key in mistakes.missing_keys)
 
-    tokenizer = lit_model.teacher.tokenizer
+    tokenizer = lit_model.student.tokenizer
 
-    lit_model.teacher.eval()
+    # lit_model.teacher.eval()
     lit_model.student.eval()
+    lit_model.to(str_to_torch_dtype(args.dtype))
+    lit_model.to('cuda')
 
     if args.temperature > 0:
         do_sample = True

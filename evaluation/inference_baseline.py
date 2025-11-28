@@ -4,6 +4,8 @@ Usage:
 python3 gen_model_answer.py --model-path lmsys/fastchat-t5-3b-v1.0 --model-id fastchat-t5-3b-v1.0
 """
 import argparse
+
+import torch.cuda
 from fastchat.utils import str_to_torch_dtype
 
 from evaluation.eval import run_eval, reorg_answer_file
@@ -13,12 +15,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def baseline_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, do_sample=False):
     input_ids = inputs.input_ids
+    import time
+    s = time.time()
     output_ids = model.generate(
         input_ids,
         do_sample=do_sample,
         temperature=temperature,
         max_new_tokens=max_new_tokens,
     )
+    torch.cuda.synchronize()
+    print(time.time() - s)
     new_token = len(output_ids[0][len(input_ids[0]):])
     step = new_token
     accept_length_list = [1] * new_token

@@ -105,7 +105,17 @@ def get_model_answers(
             prompt = conv.get_prompt()
             inputs = tokenizer([prompt], return_tensors="pt").to("cuda")
             input_ids = inputs.input_ids
+
             try:
+                if forward_func.__name__ == 'ptp_forward':
+                    forward_func(
+                        inputs,
+                        model,
+                        tokenizer,
+                        max_new_tokens,
+                        **kwargs,
+                        prepare=True,
+                    )
                 torch.cuda.synchronize()
                 start_time = time.time()
                 output_ids, new_token, step, accept_length_tree = forward_func(
@@ -144,7 +154,7 @@ def get_model_answers(
 
                 if conv.name == "xgen" and output.startswith("Assistant:"):
                     output = output.replace("Assistant:", "", 1).strip()
-            except ValueError as e: # RuntimeError as e:
+            except ValueError as e:  # RuntimeError as e:
                 print("ERROR question ID: ", question["question_id"])
                 output = "ERROR"
 
