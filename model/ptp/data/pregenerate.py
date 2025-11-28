@@ -11,6 +11,7 @@ from argparse import ArgumentParser
 from datasets import Dataset
 import torch
 from tqdm import tqdm
+from time import sleep
 
 from ptp.utils import instantiate
 
@@ -57,30 +58,34 @@ def should_init_distributed():
     )
 
 
-def init_distributed() -> tuple[int, int]:
+def init_distributed() -> tuple[int, int, int]:
     if should_init_distributed():
-        dist.init_process_group(backend="nccl" if torch.cuda.is_available() else "gloo")
-        rank = dist.get_rank()
+        dist.init_process_group(backend="gloo")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        global_rank = dist.get_rank()
         world_size = dist.get_world_size()
+        print(f"Initialized distributed process group: rank {global_rank}/{world_size}")
     else:
-        rank = 0
+        local_rank = global_rank = 0
         world_size = 1
-    return rank, world_size
+        print("Running in single-process mode.")
+    return local_rank, global_rank, world_size
 
 
 @torch.inference_mode()
 def main(experiment_dir: Path, precision: str, batch_size: int, store_interval: int):
-    rank, world_size = init_distributed()
+    local_rank, global_rank, world_size = init_distributed()
 
     with open(experiment_dir / 'pregenerate.yaml', 'r') as f:
         config = DictConfig(yaml.safe_load(f))
 
     if torch.cuda.is_available():
-        device = torch.device('cuda')
+        device = torch.device('cuda', local_rank % torch.cuda.device_count())
     elif torch.backends.mps.is_available():
         device = torch.device('mps')
     else:
         device = torch.device('cpu')
+    print(f"Using device: {device}")
     teacher = TransformerModel(**config['teacher']).eval().to(device)
     try:
         teacher = torch.compile(teacher, mode='max-autotune')
@@ -115,7 +120,7 @@ def main(experiment_dir: Path, precision: str, batch_size: int, store_interval: 
         pregenerate_data(
             batch_size, config, dataloader, device, num_completions,
             experiment_dir / "data" / split, precision, split, teacher,
-            store_interval, rank=rank, world_size=world_size,
+            store_interval, rank=global_rank, world_size=world_size,
         )
 
 
@@ -271,14 +276,42 @@ def collect_data(my_collected_data, rank: int, world_size: int):
 
 
 def save_all_data(all_data, out_dir: Path):
+    # Remove existing backup directory
     backup_dir = out_dir.parent / (out_dir.name + "_backup")
+    if backup_dir.exists():
+        for _ in range(10):
+            try:
+                shutil.rmtree(backup_dir)
+                break
+            except Exception:
+                pass
+    # Use different backup name if needed
+    if backup_dir.exists():
+        backup_idx = 0
+        while True:
+            candidate = out_dir.parent / f"{out_dir.name}_backup_{backup_idx}"
+            if candidate.exists():
+                backup_idx += 1
+            else:
+                backup_dir = candidate
+                break
+    # Rename existing output directory to backup directory
     if out_dir.exists():
         out_dir.rename(backup_dir)
+        # wait for filesystem to settle
+        for _ in range(10):
+            if not out_dir.exists():
+                break
+            sleep(0.1)
+
     dataset = Dataset.from_list(all_data)
     dataset.save_to_disk(out_dir)
     print(f"Saved {len(all_data)} samples to {out_dir}")
     if backup_dir.exists():
-        shutil.rmtree(backup_dir)
+        try:
+            shutil.rmtree(backup_dir)
+        except Exception:
+            print(f"Warning: failed to delete backup directory {backup_dir}")
 
 
 def collect_and_save(my_collected_data, all_data, out_dir: Path, rank: int, world_size: int):
@@ -305,5 +338,5 @@ if __name__ == "__main__":
     parser.add_argument('experiment_dir', type=Path)
     parser.add_argument('-p', '--precision', type=str, default='bfloat16')
     parser.add_argument('-b', '--batch_size', type=int, default=8)
-    parser.add_argument('-s', '--store_interval', type=int, default=100)
+    parser.add_argument('-s', '--store_interval', type=int, default=200)
     main(**parser.parse_args().__dict__)

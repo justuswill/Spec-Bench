@@ -1,8 +1,13 @@
+from functools import partial
+
 import torch
+from peft.tuners import lora
+from torch import Tensor
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.utils.checkpoint import checkpoint
 import torch.nn as nn
-
+from peft.tuners.lora import LoraLayer
+from typing import Any, Literal
 
 class CustomCheckpointWrapper(nn.Module):
     def __init__(self, layer, use_reentrant: bool = False, preserve_rng_state: bool = True):
@@ -45,8 +50,7 @@ def enable_custom_checkpointing(model, every_n: int = 3, start_index: int = 0,
 
     # You may need to change this path depending on the HF architecture you use.
     if not hasattr(model, "model") or not hasattr(model.model, "layers"):
-        raise AttributeError(
-            "Could not find 'model.model.layers'. Adjust enable_custom_checkpointing() for your model arch.")
+        raise AttributeError("Could not find 'model.model.layers'. Adjust enable_custom_checkpointing() for your model arch.")
 
     layers = model.model.layers
     wrapped = 0
@@ -60,10 +64,108 @@ def enable_custom_checkpointing(model, every_n: int = 3, start_index: int = 0,
             wrapped += 1
     return wrapped
 
+class GatedLinearLora(lora.Linear):
+    def __init__(self, *args, gate_window: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.gate_window = gate_window
+        self._lora_weight = None
+        self._mixed_weight = None
+        self._mixed_bias = None
+
+    @property
+    def lora_weight(self):
+        if self._lora_weight is None:
+            orig_weight = self.base_layer.weight.data.clone()
+            delta_weight = self.get_delta_weight('default')
+            self._lora_weight = orig_weight + delta_weight
+        return self._lora_weight
+
+    @property
+    def mixed_weight(self):
+        if self._mixed_weight is None:
+            self._mixed_weight = torch.stack([self.lora_weight, self.base_layer.weight])
+            self._lora_weight = None
+            del self.base_layer.weight
+            # self._mixed_bias = self.base_layer.bias
+            assert self.base_layer.bias is None
+            torch.cuda.empty_cache()
+        return self._mixed_weight
+
+    # @property
+    # def mixed_bias(self):
+    #     if self._mixed_weight is None:
+    #         self.mixed_weight()
+    #     return self._mixed_bias
+
+    # def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+    #     self._check_forward_args(x, *args, **kwargs)
+    #     adapter_names = kwargs.pop("adapter_names", None)
+    #     assert adapter_names is None
+    #
+    #     if self.disable_adapters:
+    #         if self.merged:
+    #             self.unmerge()
+    #         result = self.base_layer(x, *args, **kwargs)
+    #     elif self.merged:
+    #         raise NotImplementedError("Merged mode not supported with gated adapters.")
+    #     else:
+    #         result = self.base_layer(x, *args, **kwargs)
+    #         torch_result_dtype = result.dtype
+    #
+    #         lora_A_keys = self.lora_A.keys()
+    #         for active_adapter in self.active_adapters:
+    #             if active_adapter not in lora_A_keys:
+    #                 continue
+    #
+    #             lora_A = self.lora_A[active_adapter]
+    #             lora_B = self.lora_B[active_adapter]
+    #             dropout = self.lora_dropout[active_adapter]
+    #             scaling = self.scaling[active_adapter]
+    #             x = self._cast_input_dtype(x, lora_A.weight.dtype)
+    #             assert active_adapter not in self.lora_variant, "Only vanilla LoRA"
+    #             # lora_result = torch.zeros_like(result)
+    #             # lora_result[self._gate_selector(result)] = lora_B(lora_A(dropout(x[self._gate_selector(x)]))) * scaling
+    #             # result = result + lora_result
+    #             result[self._gate_selector(result)] += lora_B(lora_A(dropout(x[self._gate_selector(x)]))) * scaling
+    #         result = result.to(torch_result_dtype)
+
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+
+        result = x @ self.mixed_weight.transpose(1, 2)
+
+        # result = self.base_layer(x, *args, **kwargs)
+        # x_msk = x[self._gate_selector(x)]
+        # lora_result = torch.nn.functional.linear(x_msk, self.lora_weight, bias=None)
+        # lora_A = self.lora_A['default']
+        # lora_B = self.lora_B['default']
+        # scaling = self.scaling['default']
+        # result[x_msk] += lora_result
+
+        return result
+
+    def _gate_selector(self, x: torch.Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        # return (
+        #     torch.arange(x.shape[0], device=x.device)[:, None, None],
+        #     torch.arange((x.shape[1] - self.gate_window), x.shape[1], device=x.device)[None, :, None],
+        #     torch.arange(x.shape[2], device=x.device)[None, None, :],
+        # )
+        return (slice(None), slice((x.shape[1] - self.gate_window), x.shape[1]), slice(None))
+
+class BatchGatedLinearLora(GatedLinearLora):
+
+    def _gate_selector(self, x: torch.Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        if self.gate_window is not None:
+            raise NotImplementedError
+        # return (
+        #     torch.arange(0, (x.shape[0] + 1) // 2, device=x.device)[:, None, None],
+        #     torch.arange(x.shape[1], device=x.device)[None, :, None],
+        #     torch.arange(x.shape[2], device=x.device)[None, None, :],
+        # )
+        return (slice(0, (x.shape[0] + 1) // 2), slice(None), slice(None))
 
 class TransformerModel(torch.nn.Module):
     def __init__(self, model_id, reset_parameters=False, dtype: torch.dtype | str = torch.float32,
-                 use_gradient_checkpointing: bool = False, lora_config=None, **kwargs):
+                 use_gradient_checkpointing: bool = False, gated_lora: Literal[False] | int = False, lora_config=None, **kwargs):
         super().__init__()
         # Convert string dtype to torch dtype
         if isinstance(dtype, str):
@@ -75,7 +177,7 @@ class TransformerModel(torch.nn.Module):
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(model_id)
             # Use torch_dtype parameter for Hugging Face compatibility
-            self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, **kwargs)
+            self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, low_cpu_mem_usage=True, **kwargs)
             if reset_parameters:
                 self.model = AutoModelForCausalLM.from_config(self.model.config)
 
@@ -83,7 +185,7 @@ class TransformerModel(torch.nn.Module):
         if use_gradient_checkpointing:
             print("Enabling gradient checkpointing")
             self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-
+        
         if lora_config is not None:
             from peft import get_peft_model, LoraConfig, TaskType
             print("Applying LoRA adapters")
@@ -92,9 +194,17 @@ class TransformerModel(torch.nn.Module):
                 inference_mode=False,
                 **lora_config
             )
+            if gated_lora:
+                peft_config._register_custom_module({
+                    torch.nn.Linear: partial(GatedLinearLora, gate_window=gated_lora),
+                })
+            else:
+                peft_config._register_custom_module({
+                    torch.nn.Linear: partial(BatchGatedLinearLora, gate_window=None),
+                })
             self.model = get_peft_model(self.model, peft_config)
 
-        # print how many layers there are in the model
+        #print how many layers there are in the model
         # print(f"Number of layers in the model: {len(self.model.model.layers)}")
         # if use_gradient_checkpointing:
         #     wrapped = enable_custom_checkpointing(
@@ -112,7 +222,7 @@ class TransformerModel(torch.nn.Module):
 
     def generate(self, *args, **kwargs):
         return self.model.generate(*args, **kwargs)
-
+    
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
@@ -129,7 +239,7 @@ class BinaryFloatEmbedding(torch.nn.Module):
         assert torch.all(
             u == (bits_tensor.to(torch.int32) * bit_masks[None, None, :]).sum(dim=2).to(torch.int32).view(torch.float32)
         )
-        return self.u_adapter(bits_tensor.to(torch.float32))
+        return self.u_adapter(bits_tensor.to(self.u_adapter.weight.dtype))
 
 
 class SawtoothFloatEmbedding(torch.nn.Module):
@@ -177,7 +287,7 @@ class MixedTransformerModel(TransformerModel):
         self.u_adapter = adapter_class(self.model.config.hidden_size)
         self.shift_positions = shift_positions
 
-    def forward(self, input_ids: torch.LongTensor, auxiliaries: torch.FloatTensor, attention_mask=None, **kwargs):
+    def forward(self, input_ids: torch.LongTensor, auxiliaries: torch.FloatTensor, attention_mask=None, past_key_values=None, **kwargs):
         # input_embeds = self.model.model.embed_tokens(input_ids)
         input_embeds = self.model.get_input_embeddings()(input_ids)
         auxiliary_embeds = self.u_adapter(auxiliaries)
@@ -189,14 +299,14 @@ class MixedTransformerModel(TransformerModel):
         if self.shift_positions:
             assert 'position_ids' not in kwargs, "Cannot use both shift_positions and custom position_ids"
             if attention_mask is None:
-                attention_mask = torch.ones(
-                    all_embeds.shape[0], all_embeds.shape[1],
-                    device=input_ids.device, dtype=torch.bool
-                )
-            position_ids = attention_mask.cumsum(dim=1) - 1
+                seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+                position_ids = torch.arange(seen, seen + all_embeds.shape[1], device=input_ids.device)[None, :]
+            else:
+                kwargs['attention_mask'] = attention_mask
+                position_ids = attention_mask.cumsum(dim=1) - 1
+                raise NotImplementedError
+
             # First auxiliary prediction overlaps with last input token
             position_ids[:, input_embeds.shape[-2]:] -= 1
             kwargs['position_ids'] = position_ids
-        # return self.model(inputs_embeds=all_embeds, attention_mask=attention_mask, **kwargs)
-        # return self.model(inputs_embeds=all_embeds, attention_mask=attention_mask, **kwargs)
-        return self.model(inputs_embeds=all_embeds, **kwargs)
+        return self.model(inputs_embeds=all_embeds, past_key_values=past_key_values, **kwargs)

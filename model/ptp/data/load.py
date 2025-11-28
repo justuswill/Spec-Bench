@@ -115,24 +115,22 @@ class PregeneratedDataset(torch.utils.data.Dataset):
             #fix this branch bc random completion index can cause issues.
             # if completion_idx is close to len(entry[self.completions_name]) - 1, then can't enforce completion of length 16.
             entry = self.completion_dataset[original_index]
-            completion_idx = random.randint(0, len(entry[self.completions_name]) - 1)
-            split_idx = random.randint(0, len(entry[self.completions_name][0]) - 1)
+            completions = entry[self.completions_name]
+            completion_idx = random.randint(0, len(completions) - 1)
+            split_idx = random.randint(0, len(completions[0]) - 1)
         else:
             prompt_idx, completion_idx, cutoff = selector
             # Map the filtered index to the original dataset index
             original_index = int(self.useful_indices[prompt_idx])
             entry = self.completion_dataset[original_index]
-            completion_idx = completion_idx % len(entry[self.completions_name])
-            split_idx = max(0, int(cutoff * (entry[self.completions_name].shape[1] - self.train_completion_len)))
+            completions = entry[self.completions_name]
+            completion_idx = completion_idx % len(completions)
+            split_idx = max(0, int(cutoff * (completions.shape[1] - self.train_completion_len)))
 
         # Do not pad with EOS, because the model predictions might have been cut off in the pregeneration
-        completion = entry[self.completions_name][completion_idx]
+        completion = completions[completion_idx]
         left_bin_edges = entry["left_bin_edges"][completion_idx]
         right_bin_edges = entry["right_bin_edges"][completion_idx]
-        prompt_ids = torch.cat([
-                entry[self.prompt_name],
-                completion[:split_idx]
-            ])
         # print(f'='*50)
         # print(f"prompt_ids: {prompt_ids.shape}")
         # print(f'completion ids: {len(completion[split_idx:split_idx + self.train_completion_len])}')
@@ -233,8 +231,8 @@ class PregeneratedDataModule(LightningDataModule):
                     tokenizer=self.tokenizer,
                     experiment_dir=self.experiment_dir
                 )
-            # elif split == "train":
-            #     raise FileNotFoundError(f"Training dataset not found in {self.root_dir / split}")
+            elif split == "train":
+                raise FileNotFoundError(f"Training dataset not found in {self.root_dir / split}")
 
         # If no validation data exists but test data does, use test data for validation
         if "val" not in datasets and "test" in datasets:

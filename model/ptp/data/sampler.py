@@ -13,6 +13,7 @@ class CoordinatedCompletionSampler(Sampler):
         self.dataset_len = dataset_len
         self.batch_size = batch_size
         self.seed = seed
+        self.epoch = None
         self.shuffle = shuffle
 
     def __iter__(self) -> Iterator[Tuple[int, int, float]]:
@@ -20,7 +21,10 @@ class CoordinatedCompletionSampler(Sampler):
         Generate random cutoffs synchronized across all GPUs
         """
         generator = torch.Generator()
-        generator.manual_seed(self.seed)
+        # assert self.epoch is not None, "Must set epoch before using sampler"
+        # generator.manual_seed(self.seed + self.epoch)
+        seed = int(torch.empty((), dtype=torch.int64).random_().item())
+        generator.manual_seed(seed)
 
         # Random order
         if self.shuffle:
@@ -51,3 +55,6 @@ class CoordinatedCompletionSampler(Sampler):
 
     def __len__(self):
         return self.dataset_len
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
