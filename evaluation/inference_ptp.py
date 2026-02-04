@@ -14,6 +14,8 @@ from omegaconf import DictConfig
 import yaml
 import torch
 
+STPS = []
+
 def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temperature=0.0, prepare=False):
     # if not list(model.teacher.parameters())[0].device.type == 'cuda':
     #     model.to('cuda')
@@ -51,26 +53,64 @@ def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temper
         model.temperature = temperature
 
         # input_ids = torch.tensor(tokenizer.encode("A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.\nUSER: How can cross training benefit groups like runners, swimmers, or weightlifters?\nASSISTANT: "))[None, :].to('cuda')
+        import time
+        s = time.time()
+        # metrics = model.timed_error_correction({'prompt_ids': input_ids}, tokens_to_fill=max_new_tokens, eos=tokenizer.eos_token_id)
+
+        # model.student._gated_window = 16
+        # outputs = model.student(
+        #     input_ids=inputs['input_ids'][:, :10],
+        #     auxiliaries=torch.rand([1, 16], device='cuda', dtype=torch.float32)
+        # )
         # import time
         # s = time.time()
-        # metrics = model.timed_error_correction({'prompt_ids': input_ids}, tokens_to_fill=max_new_tokens, eos=tokenizer.eos_token_id)
+        # past_key_values = None
+        # generated = inputs['input_ids']
+        # n_ths = 1
+        # model.student._gated_window = n_ths
+        # model.student._mode = 'student'
+        # for step in range(1024):
+        #     outputs = model.student(
+        #         input_ids=generated[:, -1:] if past_key_values is not None else generated,
+        #         past_key_values=past_key_values,
+        #         use_cache=True,
+        #         auxiliaries=torch.rand([1, n_ths], device='cuda', dtype=torch.float32)
+        #     )
+        #     logits = outputs.logits[:, -n_ths-1, :]
+        #     past_key_values = outputs.past_key_values
+        #     probs = torch.softmax(logits, dim=-1)
+        #     next_token = torch.multinomial(probs, num_samples=1)
+        #     # next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        #     past_key_values.crop(generated.shape[1])
+        #     generated = torch.cat([generated, next_token], dim=-1)
+        #     # if next_token.item() == tokenizer.eos_token_id:
+        #     #     break
+        # output_ids = generated
+        # torch.cuda.synchronize()
+        # timed = time.time() - s
+        # new_token = len(output_ids[0][len(inputs['input_ids'][0]):])
+        # print(timed, new_token / timed, 1000 * timed / new_token)
+
         metrics = model.generate(
             {'prompt_ids': inputs.input_ids,
              # 'completion_ids': model.prep_completion_ids,'left_bin_edges':model.prep_left_bin_edges, 'right_bin_edges':model.prep_right_bin_edges
              },
-            max_new_tokens=max_new_tokens, error_correction=True, return_metrics=True, eos=tokenizer.eos_token_id)[1]
+            max_new_tokens=max_new_tokens, return_metrics=True, eos=tokenizer.eos_token_id, gated=True, correcting_via='u', collect_stats=True)[1]
         output_ids = metrics['completion']
         step = metrics['num_calls']
         accept_length_list = metrics['correct_all']
         new_token = sum(accept_length_list)
+
+        # global STPS
+        # STPS += [metrics['STP']]
 
         # model.prep_completion_ids = None
         # model.prep_left_bin_edges = None
         # model.prep_right_bin_edges = None
 
         # torch.cuda.synchronize()
-        # print(time.time() - s)
-
+        timed = time.time() - s
+        print(timed, new_token / timed, 1000 * timed / step)
     return output_ids, new_token, step, accept_length_list
 
 
@@ -144,7 +184,7 @@ if __name__ == "__main__":
     if args.answer_file:
         answer_file = args.answer_file
     else:
-        answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}-float16-temp-0.7-lora64.jsonl"
+        answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}-float16-temp-0.7-lorag128_paper_fast.jsonl"
 
     print(f"Output to {answer_file}")
 
@@ -154,15 +194,23 @@ if __name__ == "__main__":
 
     lit_model = instantiate(config['model'])
     # ckpt = torch.load(os.path.join(args.student_path, 'last-farrin.ckpt'), map_location='cuda')
-    ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r64/epoch=86.ckpt'), map_location='cuda')
+    # ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r64/epoch=86.ckpt'), map_location='cuda')
     # ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r8/gated/epoch=9.ckpt'), map_location='cuda')
+    # ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r128/gated/epoch=424.ckpt'), map_location='cuda')
+    # ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r128/epoch=484.ckpt'), map_location='cuda')
+    ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-sharegpt-lora-r128/gated/epoch=140.ckpt'), map_location='cuda')
+    # mistakes = lit_model.load_state_dict({k.replace('model.base_model.', '').replace('base_layer.', ''): v for k, v in ckpt['state_dict'].items()}, strict=False)
+    # mistakes = lit_model.load_state_dict({k.replace('base_layer.', ''): v for k, v in ckpt['state_dict'].items()}, strict=False)
     mistakes = lit_model.load_state_dict(ckpt['state_dict'], strict=False)
-    assert all(key.startswith("teacher") for key in mistakes.missing_keys)
+    assert all(key.startswith('teacher') or 'lora_linear' in key for key in mistakes.missing_keys)
 
     tokenizer = lit_model.student.tokenizer
 
     # lit_model.teacher.eval()
     lit_model.student.eval()
+    lit_model.student.model.merge_and_unload(progressbar=True)
+    # lit_model.teacher.compile()
+    # lit_model.student.compile()
     lit_model.to(str_to_torch_dtype(args.dtype))
     lit_model.to('cuda')
 

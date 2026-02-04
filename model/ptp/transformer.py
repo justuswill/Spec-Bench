@@ -1,5 +1,6 @@
 from functools import partial
 
+import numpy as np
 import torch
 from peft.tuners import lora
 from torch import Tensor
@@ -64,13 +65,67 @@ def enable_custom_checkpointing(model, every_n: int = 3, start_index: int = 0,
             wrapped += 1
     return wrapped
 
-class GatedLinearLora(lora.Linear):
+
+class GatedLinearLoraOld(lora.Linear):
     def __init__(self, *args, gate_window: int, **kwargs):
         super().__init__(*args, **kwargs)
+        self.gate_window = gate_window
+
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        self._check_forward_args(x, *args, **kwargs)
+        adapter_names = kwargs.pop("adapter_names", None)
+        assert adapter_names is None
+
+        if self.disable_adapters:
+            if self.merged:
+                self.unmerge()
+            result = self.base_layer(x, *args, **kwargs)
+        elif self.merged:
+            raise NotImplementedError("Merged mode not supported with gated adapters.")
+        else:
+            result = self.base_layer(x, *args, **kwargs)
+            torch_result_dtype = result.dtype
+
+            lora_A_keys = self.lora_A.keys()
+            for active_adapter in self.active_adapters:
+                if active_adapter not in lora_A_keys:
+                    continue
+
+                lora_A = self.lora_A[active_adapter]
+                lora_B = self.lora_B[active_adapter]
+                dropout = self.lora_dropout[active_adapter]
+                scaling = self.scaling[active_adapter]
+                x = self._cast_input_dtype(x, lora_A.weight.dtype)
+                assert active_adapter not in self.lora_variant, "Only vanilla LoRA"
+                # lora_result = torch.zeros_like(result)
+                # lora_result[self._gate_selector(result)] = lora_B(lora_A(dropout(x[self._gate_selector(x)]))) * scaling
+                # result = result + lora_result
+                result[self._gate_selector(result)] += lora_B(lora_A(dropout(x[self._gate_selector(x)]))) * scaling
+            result = result.to(torch_result_dtype)
+        return result
+
+    def _gate_selector(self, x: torch.Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        # return (
+        #     torch.arange(x.shape[0], device=x.device)[:, None, None],
+        #     torch.arange((x.shape[1] - self.gate_window), x.shape[1], device=x.device)[None, :, None],
+        #     torch.arange(x.shape[2], device=x.device)[None, None, :],
+        # )
+        return (slice(None), slice((x.shape[1] - self.gate_window()), x.shape[1]), slice(None))
+        # return (slice(0, (x.shape[0] + 1) // 2), slice(None), slice(None))
+
+class GatedLinearLora(lora.Linear):
+    GATE_WINDOW = None
+    MODE = 'student'
+
+    def __init__(self, *args, gate_window = None, merge=False, mode=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Callable
         self.gate_window = gate_window
         self._lora_weight = None
         self._mixed_weight = None
         self._mixed_bias = None
+        self.do_merge = merge
+        self.mode = mode
 
     @property
     def lora_weight(self):
@@ -83,7 +138,10 @@ class GatedLinearLora(lora.Linear):
     @property
     def mixed_weight(self):
         if self._mixed_weight is None:
-            self._mixed_weight = torch.stack([self.lora_weight, self.base_layer.weight])
+            if not self.do_merge:
+                self._mixed_weight = torch.stack([self.lora_weight, self.base_layer.weight])
+            else:
+                self._mixed_weight = self.lora_weight[None, :, :]
             self._lora_weight = None
             del self.base_layer.weight
             # self._mixed_bias = self.base_layer.bias
@@ -91,48 +149,7 @@ class GatedLinearLora(lora.Linear):
             torch.cuda.empty_cache()
         return self._mixed_weight
 
-    # @property
-    # def mixed_bias(self):
-    #     if self._mixed_weight is None:
-    #         self.mixed_weight()
-    #     return self._mixed_bias
-
-    # def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-    #     self._check_forward_args(x, *args, **kwargs)
-    #     adapter_names = kwargs.pop("adapter_names", None)
-    #     assert adapter_names is None
-    #
-    #     if self.disable_adapters:
-    #         if self.merged:
-    #             self.unmerge()
-    #         result = self.base_layer(x, *args, **kwargs)
-    #     elif self.merged:
-    #         raise NotImplementedError("Merged mode not supported with gated adapters.")
-    #     else:
-    #         result = self.base_layer(x, *args, **kwargs)
-    #         torch_result_dtype = result.dtype
-    #
-    #         lora_A_keys = self.lora_A.keys()
-    #         for active_adapter in self.active_adapters:
-    #             if active_adapter not in lora_A_keys:
-    #                 continue
-    #
-    #             lora_A = self.lora_A[active_adapter]
-    #             lora_B = self.lora_B[active_adapter]
-    #             dropout = self.lora_dropout[active_adapter]
-    #             scaling = self.scaling[active_adapter]
-    #             x = self._cast_input_dtype(x, lora_A.weight.dtype)
-    #             assert active_adapter not in self.lora_variant, "Only vanilla LoRA"
-    #             # lora_result = torch.zeros_like(result)
-    #             # lora_result[self._gate_selector(result)] = lora_B(lora_A(dropout(x[self._gate_selector(x)]))) * scaling
-    #             # result = result + lora_result
-    #             result[self._gate_selector(result)] += lora_B(lora_A(dropout(x[self._gate_selector(x)]))) * scaling
-    #         result = result.to(torch_result_dtype)
-
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-
-        result = x @ self.mixed_weight.transpose(1, 2)
-
         # result = self.base_layer(x, *args, **kwargs)
         # x_msk = x[self._gate_selector(x)]
         # lora_result = torch.nn.functional.linear(x_msk, self.lora_weight, bias=None)
@@ -141,31 +158,76 @@ class GatedLinearLora(lora.Linear):
         # scaling = self.scaling['default']
         # result[x_msk] += lora_result
 
-        return result
+        assert not self.merged
+        if GatedLinearLora.MODE == 'teacher':
+            result = x @ self.mixed_weight[1:].transpose(1, 2)
+        else:
+            result = x @ self.mixed_weight.transpose(1, 2)
+            result[1, x.shape[1] - GatedLinearLora.GATE_WINDOW:] = result[0, x.shape[1] - GatedLinearLora.GATE_WINDOW:]
+        return result[-1]
 
-    def _gate_selector(self, x: torch.Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        # return (
-        #     torch.arange(x.shape[0], device=x.device)[:, None, None],
-        #     torch.arange((x.shape[1] - self.gate_window), x.shape[1], device=x.device)[None, :, None],
-        #     torch.arange(x.shape[2], device=x.device)[None, None, :],
-        # )
-        return (slice(None), slice((x.shape[1] - self.gate_window), x.shape[1]), slice(None))
+    def unload_and_optionally_merge_module(self, **kwargs):
+        return self
+
+
+class GatedLinearLora_(lora.Linear):
+    GATE_WINDOW = None
+
+    @torch.inference_mode()
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        res = self.base_layer(x)
+        res[..., res.shape[-2] - GatedLinearLora.GATE_WINDOW:, :self.base_layer.out_features // 2] = res[..., res.shape[-2] - GatedLinearLora.GATE_WINDOW:, self.base_layer.out_features // 2:]
+        return res[..., :self.base_layer.out_features // 2]
+
+    def unload_and_optionally_merge_module(self, **kwargs):
+        orig_weight = self.base_layer.weight.data
+        delta_weight = self.get_delta_weight('default')
+        lora_weight = orig_weight + delta_weight
+        new_weight = torch.cat([orig_weight, lora_weight], dim=0)
+        self.base_layer = torch.nn.Linear(new_weight.shape[1], new_weight.shape[0], bias=False)
+        with torch.no_grad():
+            self.base_layer.weight.data.copy_(new_weight)
+        return self
+
+class GatedLinearLora_(lora.Linear):
+    GATE_WINDOW = None
+    MODE = 'student'
+
+    def __init__(self, *args, gate_window = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Callable
+        self.gate_window = gate_window
+        self.lora_linear = torch.nn.Linear(self.base_layer.in_features, self.base_layer.out_features, bias=False)
+
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        # res1 = self.base_layer(x[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :])
+        # res2 = self.lora_linear(x[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :])
+        # return torch.cat([res1, res2], dim=-2)
+        # faster to do more computation here so we can avoid a cat op
+        res = self.base_layer(x)
+        res[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :] = self.lora_linear(x[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :])
+        return res
+
+    def unload_and_optionally_merge_module(self, **kwargs):
+        orig_weight = self.base_layer.weight.data
+        delta_weight = self.get_delta_weight('default')
+        lora_weight = orig_weight + delta_weight
+        with torch.no_grad():
+            self.lora_linear.weight.data.copy_(lora_weight)
+        return self
+
 
 class BatchGatedLinearLora(GatedLinearLora):
 
-    def _gate_selector(self, x: torch.Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        if self.gate_window is not None:
-            raise NotImplementedError
-        # return (
-        #     torch.arange(0, (x.shape[0] + 1) // 2, device=x.device)[:, None, None],
-        #     torch.arange(x.shape[1], device=x.device)[None, :, None],
-        #     torch.arange(x.shape[2], device=x.device)[None, None, :],
-        # )
-        return (slice(0, (x.shape[0] + 1) // 2), slice(None), slice(None))
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+        result = x @ self.mixed_weight.transpose(1, 2)
+        return result
+
 
 class TransformerModel(torch.nn.Module):
     def __init__(self, model_id, reset_parameters=False, dtype: torch.dtype | str = torch.float32,
-                 use_gradient_checkpointing: bool = False, gated_lora: Literal[False] | int = False, lora_config=None, **kwargs):
+                 use_gradient_checkpointing: bool = False, lora_config=None,
+                 gated_lora=False, merge=False, **kwargs):
         super().__init__()
         # Convert string dtype to torch dtype
         if isinstance(dtype, str):
@@ -180,6 +242,8 @@ class TransformerModel(torch.nn.Module):
             self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, low_cpu_mem_usage=True, **kwargs)
             if reset_parameters:
                 self.model = AutoModelForCausalLM.from_config(self.model.config)
+
+        # return
 
         # Enable gradient checkpointing to save memory (trades compute for memory)
         if use_gradient_checkpointing:
@@ -196,11 +260,11 @@ class TransformerModel(torch.nn.Module):
             )
             if gated_lora:
                 peft_config._register_custom_module({
-                    torch.nn.Linear: partial(GatedLinearLora, gate_window=gated_lora),
+                    torch.nn.Linear: partial(GatedLinearLora, gate_window=0, merge=merge, mode='student'),
                 })
             else:
                 peft_config._register_custom_module({
-                    torch.nn.Linear: partial(BatchGatedLinearLora, gate_window=None),
+                    torch.nn.Linear: partial(BatchGatedLinearLora, gate_window=None, merge=merge, mode=self.mode),
                 })
             self.model = get_peft_model(self.model, peft_config)
 
@@ -220,6 +284,12 @@ class TransformerModel(torch.nn.Module):
 
         self.model.train()
 
+    def set_gate_window(self, gate_window):
+        GatedLinearLora.GATE_WINDOW = gate_window
+
+    def set_mode(self, mode):
+        GatedLinearLora.MODE = mode
+
     def generate(self, *args, **kwargs):
         return self.model.generate(*args, **kwargs)
     
@@ -231,14 +301,27 @@ class BinaryFloatEmbedding(torch.nn.Module):
     def __init__(self, embedding_dim):
         super().__init__()
         self.u_adapter = torch.nn.Linear(32, embedding_dim)
+        self.buffer = None
+
+    # def forward(self, u):
+    #     if self.buffer is None:
+    #         us = torch.linspace(0, 1, 2**8+1, device=u.device) + 2**9
+    #         res = us.to(torch.float32).view(torch.int32)
+    #         bit_masks = 2 ** torch.arange(31, -1, -1, device=u.device, dtype=torch.int32)
+    #         bits_tensor = ((res[..., None] & bit_masks[None, None, :]) != 0).int()
+    #         # assert torch.all(
+    #         #     u == (bits_tensor.to(torch.int32) * bit_masks[None, None, :]).sum(dim=2).to(torch.int32).view(torch.float32)
+    #         # )
+    #         self.buffer = self.u_adapter(bits_tensor.to(self.u_adapter.weight.dtype))
+    #     return torch.gather(self.buffer, dim=1, index=torch.floor(u * 2**8).to(int)[..., None].expand(-1, -1, 4096))
 
     def forward(self, u):
         res = u.to(torch.float32).view(torch.int32)
         bit_masks = 2 ** torch.arange(31, -1, -1, device=u.device, dtype=torch.int32)
         bits_tensor = ((res[..., None] & bit_masks[None, None, :]) != 0).int()
-        assert torch.all(
-            u == (bits_tensor.to(torch.int32) * bit_masks[None, None, :]).sum(dim=2).to(torch.int32).view(torch.float32)
-        )
+        # assert torch.all(
+        #     u == (bits_tensor.to(torch.int32) * bit_masks[None, None, :]).sum(dim=2).to(torch.int32).view(torch.float32)
+        # )
         return self.u_adapter(bits_tensor.to(self.u_adapter.weight.dtype))
 
 
@@ -291,22 +374,21 @@ class MixedTransformerModel(TransformerModel):
         # input_embeds = self.model.model.embed_tokens(input_ids)
         input_embeds = self.model.get_input_embeddings()(input_ids)
         auxiliary_embeds = self.u_adapter(auxiliaries)
+        # auxiliary_embeds = torch.zeros([auxiliaries.shape[0], auxiliaries.shape[1], input_embeds.shape[2]], device=input_ids.device, dtype=input_ids.dtype)
 
         all_embeds = torch.cat([
             input_embeds,
             auxiliary_embeds
         ], dim=1)
         if self.shift_positions:
-            assert 'position_ids' not in kwargs, "Cannot use both shift_positions and custom position_ids"
             if attention_mask is None:
+                assert 'position_ids' not in kwargs, "Cannot use both shift_positions and custom position_ids"
                 seen = past_key_values.get_seq_length() if past_key_values is not None else 0
                 position_ids = torch.arange(seen, seen + all_embeds.shape[1], device=input_ids.device)[None, :]
+                # First auxiliary prediction overlaps with last input token
+                position_ids[:, input_embeds.shape[-2]:] -= 1
+                kwargs['position_ids'] = position_ids
             else:
                 kwargs['attention_mask'] = attention_mask
-                position_ids = attention_mask.cumsum(dim=1) - 1
-                raise NotImplementedError
-
-            # First auxiliary prediction overlaps with last input token
-            position_ids[:, input_embeds.shape[-2]:] -= 1
-            kwargs['position_ids'] = position_ids
+                assert 'position_ids' in kwargs.keys()
         return self.model(inputs_embeds=all_embeds, past_key_values=past_key_values, **kwargs)

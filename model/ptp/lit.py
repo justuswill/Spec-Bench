@@ -1,4 +1,5 @@
 import time
+
 from lightning.pytorch import LightningModule
 from typing import Literal, List, Mapping, Any
 from model.ptp.transformer import TransformerModel, MixedTransformerModel
@@ -6,6 +7,9 @@ import random
 import torch
 import numpy as np
 from transformers.cache_utils import DynamicCache
+
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class ParallelSamplingLightningModule(LightningModule):
@@ -46,6 +50,11 @@ class ParallelSamplingLightningModule(LightningModule):
             'must specify number of tokens to predict per student call and total tokens to fill iteratively'
 
         self.pbar_metrics = pbar_metrics
+
+        Y = np.load('data/Y.npy')
+        YY = Y.argmin(axis=1)
+        YY[Y.all(axis=1)] = 20
+        self.hist_base = torch.tensor(np.unique(YY, return_counts=True)[1] / YY.shape[0], device=device)
     
     def configure_model(self) -> None:
         if self.student is None:
@@ -425,211 +434,11 @@ class ParallelSamplingLightningModule(LightningModule):
                     metrics[f'{short_positional_metric}_pos_{position}'] = metrics[positional_metric][position]
         return metrics
 
-    # @torch.inference_mode()
-    # def generate(self, batch, max_new_tokens=None, max_length=None, attention_mask=None,
-    #              use_cache=True, return_metrics=False, do_sample=True, stopping_criteria=None,
-    #              pad_token_id=None, error_correction=False, eos=None, recompute=True):
-    #     input_ids = batch['prompt_ids']
-    #     assert input_ids.shape[0] == 1, "Batch size must be 1 for now"
-    #
-    #     if max_length is not None:
-    #         assert max_new_tokens is None, "Only one of max_length and max_new_tokens can be set"
-    #         max_new_tokens = max_length - input_ids.shape[1]
-    #     assert max_new_tokens is not None, "One of max_length and max_new_tokens must be set"
-    #     assert max_new_tokens > 0, f"max_new_tokens must be positive, got {max_new_tokens}"
-    #     if not do_sample:
-    #         import warnings
-    #         warnings.warn("do_sample=False is not supported, proceeding with sampling anyway.")
-    #
-    #     # This would be faster using completion_ids and bin_edges but we want to measure the verification call.
-    #     if error_correction:
-    #         self.teacher.eval()
-    #     prompt_ids = input_ids
-    #     # prompt_ids = prompt_ids.repeat(20, 1)
-    #     # if attention_mask is None:
-    #     #     attention_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=prompt_ids.device)
-    #     # prompt_mask = attention_mask
-    #     device = prompt_ids.device
-    #     kv_student = None
-    #     kv_teacher = None
-    #
-    #     metrics = {
-    #         'accuracy': [],
-    #         'correct': [],
-    #         'time_student': [],
-    #         'time_teacher': [],
-    #         'total_time': [],
-    #         'token_per_time': []
-    #     }
-    #     # if all predicted tokens are correct, verification can add one extra token
-    #     tokens_to_fill = max_new_tokens
-    #     z_rnd_all = torch.rand([prompt_ids.shape[0], max_new_tokens + 1], device=device, dtype=torch.float32)
-    #     if not recompute:
-    #         left_bin_edges = batch['left_bin_edges']
-    #         right_bin_edges = batch['right_bin_edges']
-    #         z_rnd_all[:, :left_bin_edges.shape[1]] = left_bin_edges + (right_bin_edges - left_bin_edges) * z_rnd_all[:, :left_bin_edges.shape[1]]
-    #
-    #     while tokens_to_fill > 0:
-    #         # Student proposal
-    #         n_prop = min(self.student_calls_per_step * self.tokens_per_student_call, tokens_to_fill)
-    #         z_idx = max_new_tokens - tokens_to_fill
-    #         z_rnd = z_rnd_all[:, z_idx:z_idx + n_prop + 1]
-    #         start_time = time.time()
-    #         for k in range(min(self.student_calls_per_step, np.ceil(tokens_to_fill / self.tokens_per_student_call))):
-    #             ths_n_prop = min((k + 1) * self.tokens_per_student_call,
-    #                              tokens_to_fill) - k * self.tokens_per_student_call
-    #             # input_mask = torch.cat([
-    #             #     prompt_mask,
-    #             #     torch.ones([prompt_ids.shape[0], ths_n_prop], device=prompt_mask.device, dtype=prompt_mask.dtype)
-    #             # ], dim=1)
-    #             if use_cache:
-    #                 outputs = self.student(
-    #                     input_ids=prompt_ids if kv_student is None else prompt_ids[:, kv_student.get_seq_length():],
-    #                     # attention_mask=input_mask,
-    #                     auxiliaries=z_rnd[
-    #                         :, k * self.tokens_per_student_call:k * self.tokens_per_student_call + ths_n_prop],
-    #                     past_key_values=kv_student,
-    #                     use_cache=True
-    #                 )
-    #                 full_logits = outputs.logits
-    #                 kv_student = outputs.past_key_values
-    #             else:
-    #                 full_logits = self.student(
-    #                     input_ids=prompt_ids,
-    #                     # attention_mask=input_mask,
-    #                     auxiliaries=z_rnd[
-    #                         :, k * self.tokens_per_student_call:k * self.tokens_per_student_call + ths_n_prop],
-    #                 ).logits
-    #             if self.loss_type.startswith('kl'):
-    #                 raise NotImplementedError
-    #             elif 'bc' in self.loss_type:
-    #                 # ------
-    #                 # O-PTP
-    #                 # ------
-    #                 student_logits = full_logits[:, -ths_n_prop:]
-    #                 student_predicted = student_logits.argmax(dim=2)
-    #                 student_completion = torch.cat([
-    #                     prompt_ids,
-    #                     student_predicted,
-    #                 ], dim=1)
-    #             else:
-    #                 raise NotImplementedError(self.loss_type)
-    #             prompt_ids = student_completion
-    #             # prompt_mask = input_mask
-    #         metrics['time_student'] += [time.time() - start_time]
-    #
-    #         # Teacher verification
-    #         start_time = time.time()
-    #         if use_cache:
-    #             # if kv_teacher is None and kv_student is not None:
-    #             #     from copy import deepcopy
-    #             #     kv_teacher = deepcopy(kv_student)
-    #             #     kv_teacher.crop(input_ids.shape[1])
-    #             outputs = self.teacher(
-    #                 input_ids=prompt_ids if kv_teacher is None else prompt_ids[:, kv_teacher.get_seq_length():],
-    #                 # attention_mask=prompt_mask,
-    #                 past_key_values=kv_teacher,
-    #                 use_cache=True
-    #             )
-    #             kv_teacher = outputs.past_key_values
-    #         else:
-    #             outputs = self.teacher(
-    #                 input_ids=prompt_ids,
-    #                 # attention_mask=prompt_mask,
-    #                 return_scores=True
-    #             )
-    #
-    #         tgt_logits = outputs.logits[..., - n_prop - 1:, :]
-    #         tgt_logits = self.adapt_logits(tgt_logits)
-    #         # ? assert logits.dtype == torch.float32, logits.dtype
-    #         right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
-    #         right_bin_edges[..., -1] = 1
-    #         right_bin_edges[..., 0] = 0
-    #         correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
-    #         # print(correct_tokens.min(), correct_tokens.max())
-    #         # print('a')
-    #         # correct_right = torch.gather(right_bin_edges, dim=2, index=correct_tokens[..., None])[..., 0]
-    #         # correct_left = torch.gather(right_bin_edges, dim=2, index=correct_tokens[..., None]-1)[..., 0]
-    #         # print('b')
-    #         # pos_in_interval = (z_rnd - correct_left) / (correct_right - correct_left)
-    #         if not recompute:
-    #             correct_tokens = batch['completion_ids'][:, z_idx:z_idx + n_prop]
-    #         if self.student_calls_per_step >= 1:
-    #             if not recompute:
-    #                 check_tokens = correct_tokens
-    #             else:
-    #                 check_tokens = correct_tokens[..., :-1]
-    #             # predict_tokens = prompt_ids[..., - n_prop:]
-    #             predict_tokens = prompt_ids[..., - n_prop:][..., :correct_tokens.shape[1]]
-    #             num_correct = (check_tokens == predict_tokens).float().argmin(dim=1)
-    #             num_correct[(check_tokens == predict_tokens).all(dim=1)] = n_prop
-    #
-    #             idx = 0 # int(torch.abs(pos_in_interval - 0.5)[:, 0].argmin())
-    #             num_correct = min(int(num_correct[idx].float().mean()), 15)
-    #             accuracy = (check_tokens == predict_tokens)[idx].float().mean().item()
-    #         else:
-    #             num_correct = 0
-    #             accuracy = 1.0
-    #         metrics['accuracy'] += [accuracy]
-    #         metrics['correct'] += [num_correct + 1]
-    #
-    #         # Fix first mistake, only works for batch_size=1 for now
-    #         pos = int(prompt_ids.shape[-1] - (n_prop - num_correct))
-    #         pos_pre = int(prompt_ids.shape[-1] - n_prop)
-    #         if n_prop > num_correct:
-    #             prompt_ids = prompt_ids[idx, :pos].expand(prompt_ids.shape[0], -1)
-    #             # prompt_mask = prompt_mask[..., :pos]
-    #         # prune kv-cache
-    #         if kv_teacher is not None:
-    #             kv_teacher.crop(pos)
-    #             # for l in kv_teacher.layers:
-    #             #     l.keys = l.keys[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
-    #             #     l.values = l.values[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
-    #         if kv_student is not None:
-    #             kv_student.crop(pos_pre)
-    #             # for l in kv_student.layers:
-    #             #     l.keys = l.keys[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
-    #             #     l.values = l.values[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
-    #         prompt_ids = torch.cat([
-    #             prompt_ids,
-    #             correct_tokens[idx:idx+1, num_correct][:, None].repeat(prompt_ids.shape[0], 1),
-    #         ], dim=1)
-    #         # prompt_mask = torch.cat([
-    #         #     prompt_mask,
-    #         #     torch.ones([1, 1], device=prompt_mask.device, dtype=prompt_mask.dtype),
-    #         # ], dim=1)
-    #         tokens_to_fill -= (num_correct + 1)
-    #
-    #         metrics['time_teacher'] += [time.time() - start_time]
-    #
-    #         if eos in prompt_ids[idx, pos_pre:]:
-    #             break
-    #         # if stopping_criteria is not None and stopping_criteria(prompt_ids):
-    #         #     break
-    #
-    #     total_time = sum(metrics['time_student'] + metrics['time_teacher'])
-    #     metrics = {
-    #         'completion': prompt_ids,
-    #         'accuracy': np.mean(metrics['accuracy']),
-    #         'correct_per_call': np.mean(metrics['correct']) - 1,
-    #         'correct_first': metrics['correct'][0] - 1,
-    #         'correct_second': metrics['correct'][1] - 1,
-    #         'correct_all': metrics['correct'],
-    #         'time_student': np.mean(metrics['time_student']),
-    #         'time_teacher': np.mean(metrics['time_teacher']),
-    #         'time': total_time,
-    #         'num_calls': len(metrics['correct']),
-    #         'token_per_time': (sum(metrics['correct'])) / total_time
-    #     }
-    #
-    #     if return_metrics:
-    #         return input_ids, metrics
-    #     return input_ids
-
     @torch.inference_mode()
-    def generate(self, batch, max_new_tokens=None, max_length=None, attention_mask=None,
+    def generate_old(self, batch, max_new_tokens=None, max_length=None, attention_mask=None,
                  use_cache=True, return_metrics=False, do_sample=True, stopping_criteria=None,
-                 pad_token_id=None, error_correction=False, eos=None, recompute=True):
+                 pad_token_id=None, error_correction=False, eos=None, recompute=True, gated=False,
+                 correcting_via = 'u', correct_via_hybrid=True, collect_stats=False):
         input_ids = batch['prompt_ids']
         assert input_ids.shape[0] == 1, "Batch size must be 1 for now"
 
@@ -643,8 +452,10 @@ class ParallelSamplingLightningModule(LightningModule):
             warnings.warn("do_sample=False is not supported, proceeding with sampling anyway.")
 
         # This would be faster using completion_ids and bin_edges but we want to measure the verification call.
+        if error_correction:
+            self.teacher.eval()
         prompt_ids = input_ids
-        prompt_ids = prompt_ids.repeat(2, 1)
+        # prompt_ids = prompt_ids.repeat(20, 1)
         # if attention_mask is None:
         #     attention_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=prompt_ids.device)
         # prompt_mask = attention_mask
@@ -668,74 +479,191 @@ class ParallelSamplingLightningModule(LightningModule):
             right_bin_edges = batch['right_bin_edges']
             z_rnd_all[:, :left_bin_edges.shape[1]] = left_bin_edges + (right_bin_edges - left_bin_edges) * z_rnd_all[:, :left_bin_edges.shape[1]]
 
+        # Fill caches
+        if use_cache and gated:
+            self.student._gated_window = 0
+            self.student._mode = 'teacher'
+            outputs = self.student(
+                input_ids=input_ids[:, :-1],
+                use_cache=True,
+                auxiliaries = z_rnd_all[:, 1000000:],
+            )
+            from copy import deepcopy
+            kv_teacher = outputs.past_key_values
+            kv_student = kv_teacher
+
+        STP = {'x': [], 'y': [], 'n': [], 'nrel': []}
+        reduced = self.tokens_per_student_call
+
         while tokens_to_fill > 0:
             # Student proposal
-            n_prop = min(self.tokens_per_student_call, tokens_to_fill)
+            n_prop = min(self.student_calls_per_step * self.tokens_per_student_call, tokens_to_fill)
+            if collect_stats:
+                n_prop = min(n_prop, reduced)
             z_idx = max_new_tokens - tokens_to_fill
             z_rnd = z_rnd_all[:, z_idx:z_idx + n_prop + 1]
             start_time = time.time()
-            # input_mask = torch.cat([
-            #     prompt_mask,
-            #     torch.ones([prompt_ids.shape[0], ths_n_prop], device=prompt_mask.device, dtype=prompt_mask.dtype)
-            # ], dim=1)
-            if use_cache:
-                outputs = self.student(
-                    input_ids=prompt_ids if kv_student is None else prompt_ids[:, kv_student.get_seq_length():],
-                    # attention_mask=input_mask,
-                    auxiliaries=z_rnd[:, :-1],
-                    past_key_values=kv_student,
-                    use_cache=True
-                )
-                full_logits = outputs.logits
-                kv_student = outputs.past_key_values
-            else:
-                full_logits = self.student(
-                    input_ids=prompt_ids,
-                    # attention_mask=input_mask,
-                    auxiliaries=z_rnd[:, :-1],
-                ).logits
-            if self.loss_type.startswith('kl'):
-                raise NotImplementedError
-            elif 'bc' in self.loss_type:
-                # ------
-                # O-PTP
-                # ------
-                student_logits = full_logits[:1, -n_prop:]
-                student_predicted = student_logits.argmax(dim=2)
-                student_completion = torch.cat([
-                    prompt_ids[1:],
-                    student_predicted,
-                ], dim=1)
-            else:
-                raise NotImplementedError(self.loss_type)
-            prompt_ids = student_completion.repeat(2, 1)
-            # prompt_mask = input_mask
+            for k in range(min(self.student_calls_per_step, np.ceil(tokens_to_fill / self.tokens_per_student_call))):
+                ths_n_prop = min((k + 1) * self.tokens_per_student_call,
+                                 tokens_to_fill) - k * self.tokens_per_student_call
+                if collect_stats:
+                    ths_n_prop = min(ths_n_prop, reduced)
+                # input_mask = torch.cat([
+                #     prompt_mask,
+                #     torch.ones([prompt_ids.shape[0], ths_n_prop], device=prompt_mask.device, dtype=prompt_mask.dtype)
+                # ], dim=1)
+                if gated:
+                    self.student._gated_window = ths_n_prop
+                    self.student._mode = 'student'
+                if use_cache:
+                    outputs = self.student(
+                        input_ids=prompt_ids if kv_student is None else prompt_ids[:, kv_student.get_seq_length():],
+                        # attention_mask=input_mask,
+                        auxiliaries=z_rnd[
+                            :, k * self.tokens_per_student_call:k * self.tokens_per_student_call + ths_n_prop],
+                        past_key_values=kv_student,
+                        use_cache=True
+                    )
+                    full_logits = outputs.logits
+                    kv_student = outputs.past_key_values
+                    if gated:
+                        # pass
+                        pos_pre = int(prompt_ids.shape[-1] - 1)
+                        kv_student.crop(pos_pre)
+                        kv_teacher = kv_student
+                else:
+                    full_logits = self.student(
+                        input_ids=prompt_ids,
+                        # attention_mask=input_mask,
+                        auxiliaries=z_rnd[
+                            :, k * self.tokens_per_student_call:k * self.tokens_per_student_call + ths_n_prop],
+                    ).logits
+                if self.loss_type.startswith('kl'):
+                    raise NotImplementedError
+                elif 'bc' in self.loss_type:
+                    # ------
+                    # O-PTP
+                    # ------
+                    student_logits = full_logits[:, -ths_n_prop:]
+                    student_predicted = student_logits.argmax(dim=2)
+                    # gated guarantees one token
+                    if gated:
+                        tgt_logits = self.adapt_logits(full_logits[:, -ths_n_prop - 1])
+                        right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
+                        right_bin_edges[..., -1] = 1
+                        right_bin_edges[..., 0] = 0
+                        correct_token = (right_bin_edges > z_rnd[:, :1][..., None]).max(dim=-1).indices
+                        student_predicted[:, 0] = correct_token[0, 0]
+                    student_completion = torch.cat([
+                        prompt_ids,
+                        student_predicted,
+                    ], dim=1)
+                else:
+                    raise NotImplementedError(self.loss_type)
+                prompt_ids = student_completion
+
+                # prompt_mask = input_mask
+            # torch.cuda.synchronize()
             metrics['time_student'] += [time.time() - start_time]
+
+            # Skip teacher
+            if correcting_via == 'true':
+                num_correct = ths_n_prop
+                accuracy = 1.0
+                metrics['accuracy'] += [accuracy]
+                metrics['correct'] += [num_correct]
+                pos_pre = int(prompt_ids.shape[-1] - n_prop)
+                # prune kv-cache
+                if kv_student is not None and not gated:
+                    kv_student.crop(pos_pre)
+                tokens_to_fill -= num_correct
+                if eos in prompt_ids[0, pos_pre:]:
+                    break
+                continue
 
             # Teacher verification
             start_time = time.time()
+            if gated:
+                self.student._gated_window = 0
+                self.student._mode = 'teacher'
             if use_cache:
-                outputs = super(MixedTransformerModel, self.student).forward(
-                    input_ids=prompt_ids if kv_teacher is None else prompt_ids[:, kv_teacher.get_seq_length():],
-                    # attention_mask=prompt_mask,
-                    past_key_values=kv_teacher,
-                    use_cache=True
-                )
+                # if kv_teacher is None and kv_student is not None:
+                #     from copy import deepcopy
+                #     kv_teacher = deepcopy(kv_student)
+                #     kv_teacher.crop(input_ids.shape[1])
+                if gated:
+                    outputs = self.student(
+                        auxiliaries = z_rnd[:, 1000000:],
+                        input_ids=prompt_ids if kv_teacher is None else prompt_ids[:, kv_teacher.get_seq_length():],
+                        # attention_mask=prompt_mask,
+                        past_key_values=kv_teacher,
+                        use_cache=True
+                    )
+                else:
+                    outputs = self.teacher(
+                        input_ids=prompt_ids if kv_teacher is None else prompt_ids[:, kv_teacher.get_seq_length():],
+                        # attention_mask=prompt_mask,
+                        past_key_values=kv_teacher,
+                        use_cache=True
+                    )
                 kv_teacher = outputs.past_key_values
             else:
-                outputs = super(MixedTransformerModel, self.student).forward(
+                # outputs = self.student(
+                outputs = self.teacher(
                     input_ids=prompt_ids,
                     # attention_mask=prompt_mask,
                     return_scores=True
                 )
 
-            tgt_logits = outputs.logits[-1:, - n_prop - 1:, :]
+            tgt_logits = outputs.logits[..., - n_prop - 1:, :]
             tgt_logits = self.adapt_logits(tgt_logits)
             # ? assert logits.dtype == torch.float32, logits.dtype
+
+            # Our style
             right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
             right_bin_edges[..., -1] = 1
             right_bin_edges[..., 0] = 0
             correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+            if correcting_via in ['threshold', 'threshold-q']:
+                assert correct_via_hybrid
+                pred_tokens = prompt_ids[..., - n_prop:][..., :correct_tokens.shape[1]]
+                if correcting_via == 'threshold':
+                    tgt_probs = torch.softmax(tgt_logits, dim=-1)[:, :-1].gather(dim=2, index=pred_tokens.unsqueeze(-1)).squeeze(-1)
+                else:
+                    tgt_probs = torch.softmax(student_logits, dim=-1).gather(dim=2, index=pred_tokens.unsqueeze(-1)).squeeze(-1)
+                correct_mask = (0.8 <= tgt_probs)
+                correct_tokens[..., :-1][correct_mask] = pred_tokens[correct_mask].clone()
+            elif correcting_via in ['dist', 'dist-q']:
+                # Spec-style MH step
+                pred_tokens = prompt_ids[..., - n_prop:][..., :correct_tokens.shape[1]]
+                if correct_via_hybrid:
+                    correct_mask = correct_tokens[..., :-1] == pred_tokens
+                else:
+                    correct_mask = torch.ones_like(pred_tokens) == 0
+                tgt_probs = torch.softmax(tgt_logits, dim=-1)[:, :-1].gather(dim=2, index=pred_tokens.unsqueeze(-1)).squeeze(-1)
+                if correcting_via == 'dist':
+                    r = torch.rand_like(tgt_probs)
+                    correct_mask = (r <= tgt_probs) | correct_mask
+                else:
+                    std_probs = torch.softmax(student_logits, dim=-1).gather(dim=2, index=pred_tokens.unsqueeze(-1)).squeeze(-1)
+                    r = torch.rand_like(tgt_probs)
+                    correct_mask = (std_probs <= tgt_probs) | (r <= tgt_probs/std_probs) | correct_mask
+                correct_tokens[..., :-1] = pred_tokens.clone()
+                if not correct_mask.all():
+                    if correcting_via == 'dist':
+                        new_logits = tgt_logits.clone()
+                        new_logits.scatter_(dim=2, index=pred_tokens.unsqueeze(-1), value=float('-inf'))
+                    else:
+                        new_probs = torch.softmax(tgt_logits, dim=-1).clone()
+                        reduced = (tgt_probs - std_probs).clip(min=0)
+                        new_probs.scatter_(dim=2, index=pred_tokens.unsqueeze(-1), src=reduced.unsqueeze(-1))
+                        new_logits = torch.log(new_probs / new_probs.sum(dim=-1, keepdim=True) + 1e-8)
+                    correct_tokens[..., :-1][~correct_mask] = torch.distributions.Categorical(logits=new_logits[:, :-1][~correct_mask]).sample()
+            # elif correcting_via == 'true':
+            #     correct_tokens[..., :3] = pred_tokens[:3].clone()
+            elif correcting_via != 'u':
+                raise NotImplementedError
+
             # print(correct_tokens.min(), correct_tokens.max())
             # print('a')
             # correct_right = torch.gather(right_bin_edges, dim=2, index=correct_tokens[..., None])[..., 0]
@@ -753,8 +681,56 @@ class ParallelSamplingLightningModule(LightningModule):
                 predict_tokens = prompt_ids[..., - n_prop:][..., :correct_tokens.shape[1]]
                 num_correct = (check_tokens == predict_tokens).float().argmin(dim=1)
                 num_correct[(check_tokens == predict_tokens).all(dim=1)] = n_prop
+                if collect_stats:
+                    student_p = torch.softmax(student_logits, dim=-1)[0, range(ths_n_prop), student_predicted]
+                    STP['y'] += [(check_tokens == predict_tokens).detach().cpu()]
+                    STP['x'] += [(student_p).detach().cpu()]
+                    # Estimated correctness likelihood
+                    # A = np.insert(np.cumprod(student_p), 0, 1) * (1 - np.append(student_p, 0))
+                    A = torch.cumprod(student_p[0], dim=-1)
+                    A[:-1] *= 1 - student_p[0, 1:]
+                    # Optimize as Knapsack
+                    if False:
+                        W = A * torch.arange(1, ths_n_prop + 1, device=A.device)
+                        idxs = W.argsort(descending=True)
+                        slowed = ths_n_prop / 50 * torch.arange(1, ths_n_prop + 1, device=W.device)
+                        K = torch.argmax(torch.cumsum(W[idxs], dim=-1) / (1 + slowed)) + 1
+                        B = torch.tensor([ths_n_prop if i in idxs[:K] else 0 for i in range(ths_n_prop + 1)], device=A.device)
+                    # Optimize with Dinkelbach
+                    else:
+                        Y = np.load('data/Y.npy')
+                        YY = Y.argmin(axis=1)
+                        YY[Y.all(axis=1)] = 20
+                        # Dirichilet prior with effective sample size = 50
+                        base = np.unique(YY, return_counts=True)[1] / YY.shape[0] * 50
+                        diri = np.zeros(21)
+                        # if len(np.array(metrics['correct'])[np.array(metrics['correct']) > 0][np.array(STP['nrel']) < 1]) > 0:
+                        #     diri += np.bincount(np.array(metrics['correct'])[np.array(metrics['correct']) > 0][np.array(STP['nrel']) < 1], minlength=21)
+                        # for th in np.array(metrics['correct'])[np.array(metrics['correct']) > 0][np.array(STP['nrel']) == 1]:
+                        #     diri[th+1:] += base[th+1:] / base[th+1:].sum()
+                        #     # diri[th + 1:] += 1 # / base[th+1:].shape[0]
+                        H = torch.tensor(np.cumsum((base + diri) / (base + diri).sum() * np.arange(21)), device=A.device)
+                        if len(STP['nrel']) > 0 and np.array(STP['nrel']).mean() > 0.2:
+                            new_lam = np.clip((np.array(STP['nrel']).mean() - 0.2) / 0.2, 0, 1)
+                            H = (1 - new_lam) * H + new_lam * torch.arange(self.tokens_per_student_call + 1, device=A.device)
+                        # H = torch.arange(self.tokens_per_student_call + 1, device=A.device)
+                        lam_pre, lam = 0, 0
+                        for _ in range(20):
+                            B = torch.argmax(A[:, None] * H[None, :self.tokens_per_student_call + 1] - lam * torch.arange(self.tokens_per_student_call + 1, device=A.device)[None, :] / 50, dim=1)
+                            lam_pre = lam
+                            lam = torch.sum(A * H[B]) / (1 + B.sum() / 50)
+                            if (lam_pre == lam).all():
+                                break
+                    # todo, grab lower in case of miss
+                    reduced = int(B[num_correct - 1])
+                    STP['n'] += [sum(B).item()]
+                    STP['nrel'] += [(num_correct / ths_n_prop).item()]
+                    if reduced == 0:
+                        metrics['accuracy'] += [0]
+                        metrics['correct'] += [0]
+                        reduced = self.tokens_per_student_call
 
-                idx = 0  # int(torch.abs(pos_in_interval - 0.5)[:, 0].argmin())
+                idx = 0 # int(torch.abs(pos_in_interval - 0.5)[:, 0].argmin())
                 num_correct = min(int(num_correct[idx].float().mean()), 15)
                 accuracy = (check_tokens == predict_tokens)[idx].float().mean().item()
             else:
@@ -775,14 +751,14 @@ class ParallelSamplingLightningModule(LightningModule):
                 # for l in kv_teacher.layers:
                 #     l.keys = l.keys[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
                 #     l.values = l.values[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
-            if kv_student is not None:
+            if kv_student is not None and not gated:
                 kv_student.crop(pos_pre)
                 # for l in kv_student.layers:
                 #     l.keys = l.keys[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
                 #     l.values = l.values[idx, ...].expand(prompt_ids.shape[0], *[-1] * 3)
             prompt_ids = torch.cat([
                 prompt_ids,
-                correct_tokens[idx:idx + 1, num_correct][:, None].repeat(prompt_ids.shape[0], 1),
+                correct_tokens[idx:idx+1, num_correct][:, None].repeat(prompt_ids.shape[0], 1),
             ], dim=1)
             # prompt_mask = torch.cat([
             #     prompt_mask,
@@ -790,6 +766,7 @@ class ParallelSamplingLightningModule(LightningModule):
             # ], dim=1)
             tokens_to_fill -= (num_correct + 1)
 
+            # torch.cuda.synchronize()
             metrics['time_teacher'] += [time.time() - start_time]
 
             if eos in prompt_ids[idx, pos_pre:]:
@@ -797,19 +774,418 @@ class ParallelSamplingLightningModule(LightningModule):
             # if stopping_criteria is not None and stopping_criteria(prompt_ids):
             #     break
 
+        # import matplotlib.pyplot as plt; from sklearn.linear_model import LogisticRegression; X = torch.concat(STP['x'], dim=1).cpu()[0]; Y = torch.concat(STP['y'], dim=1).cpu()[0]; clf = LogisticRegression(); clf.fit(X[:, None], Y)
+        # plt.scatter(X, Y, alpha=0.02); plt.plot(np.linspace(0, 1, 100), clf.predict_proba(np.linspace(0, 1, 100)[:, None])[:, 1], label='LogReg'); plt.xlabel('Student confidence'); plt.ylabel('Teacher Verification')
+        # plt.plot([i / 10 for i in range(11) for _ in range(2)][1:-1], [Y[torch.floor(X * 10) == i].float().mean() for i in range(10) for _ in range(2)], label='binned'); plt.legend(); plt.tight_layout(); plt.show()
+
         total_time = sum(metrics['time_student'] + metrics['time_teacher'])
         metrics = {
             'completion': prompt_ids,
             'accuracy': np.mean(metrics['accuracy']),
             'correct_per_call': np.mean(metrics['correct']) - 1,
             'correct_first': metrics['correct'][0] - 1,
-            'correct_second': metrics['correct'][1] - 1,
+            # 'correct_second': metrics['correct'][1] - 1,
             'correct_all': metrics['correct'],
             'time_student': np.mean(metrics['time_student']),
             'time_teacher': np.mean(metrics['time_teacher']),
             'time': total_time,
             'num_calls': len(metrics['correct']),
-            'token_per_time': (sum(metrics['correct'])) / total_time
+            'token_per_time': (sum(metrics['correct'])) / total_time,
+            'STP': STP
+        }
+
+        if return_metrics:
+            return input_ids, metrics
+        return input_ids
+
+    # @torch.inference_mode()
+    # def generate(self, batch, max_new_tokens, use_cache=True, return_metrics=False, eos=None, recompute=True,
+    #              gated=True, correcting_via=None, collect_stats=None):
+    #     prompt_ids = batch['prompt_ids']
+    #     assert prompt_ids.shape[0] == 1, "Batch size must be 1 for now"
+    #
+    #     # if attention_mask is None:
+    #     #     attention_mask = torch.ones_like(prompt_ids, dtype=torch.long, device=prompt_ids.device)
+    #     # prompt_mask = attention_mask
+    #     device = prompt_ids.device
+    #     kv_cache = DynamicCache()
+    #
+    #     metrics = {
+    #         'accuracy': [],
+    #         'correct': [],
+    #         'time': [],
+    #         'time-1': [],
+    #         'time-2': [],
+    #         'time-3': [],
+    #         'time-4': [],
+    #         'time_model': [],
+    #     }
+    #     # if all predicted tokens are correct, verification can add one extra token
+    #     tokens_to_fill = max_new_tokens
+    #     tokens_to_verify = max_new_tokens
+    #
+    #     z_rnd_all = torch.rand([prompt_ids.shape[0], max_new_tokens + self.tokens_per_student_call], device=device, dtype=torch.float32)
+    #
+    #     while tokens_to_verify > 0:
+    #         # Student proposal
+    #         n_prop = max(min(self.tokens_per_student_call, tokens_to_fill), 0)
+    #         n_verify = tokens_to_verify - tokens_to_fill
+    #         z_idx = max_new_tokens - tokens_to_fill
+    #         # z_rnd = z_rnd_all[:, z_idx:z_idx + n_prop]
+    #         z_rnd = torch.cat([z_rnd_all[:, z_idx - d:z_idx - d + n_prop] for d in range(n_verify + 1)], dim=1)
+    #
+    #         input_ids = prompt_ids
+    #         if not gated:
+    #             z_rnd = z_rnd.repeat(2, 1)
+    #             input_ids = input_ids.repeat(2, 1)
+    #         else:
+    #             self.student._gated_window = (n_verify + 1) * n_prop
+    #         # seq_len = input_ids.shape[1] + n_prop
+    #         # todo: could be more if n_prop < tokens_per_student_call
+    #         seq_len = prompt_ids.shape[1] + (n_verify + 1) * n_prop
+    #         input_mask = torch.tril(torch.ones(seq_len, seq_len))
+    #         for d in range(1, n_verify+1):
+    #             input_mask[-d * n_prop: seq_len - (d-1) * n_prop, input_ids.shape[1] - n_verify - 1 + d:-d * n_prop] = 0
+    #         input_mask = input_mask[kv_cache.get_seq_length():]
+    #         input_mask = (1 - input_mask[None, None, :, :].to('cuda').to(torch.float16)) * -1e15
+    #         input_position_ids = torch.arange(kv_cache.get_seq_length(), seq_len, device=input_ids.device)[None, :]
+    #         pos = input_ids.shape[1] - kv_cache.get_seq_length()
+    #         for d in range(0, n_verify + 1):
+    #             input_position_ids[:, pos + d * n_prop: pos + (d+1) * n_prop] -= d * n_prop - d + 1
+    #         outputs = self.student(
+    #             input_ids=input_ids[:, kv_cache.get_seq_length():],
+    #             attention_mask=input_mask,
+    #             position_ids=input_position_ids,
+    #             auxiliaries=z_rnd,
+    #             past_key_values=kv_cache,
+    #             use_cache=True
+    #         )
+    #         kv_cache = outputs.past_key_values
+    #         full_logits = outputs.logits
+    #         # tgt_logits = full_logits[-1:, :-n_prop]
+    #         tgt_logits = full_logits[-1:, :pos]
+    #         # O-PTP
+    #         assert 'bc' in self.loss_type
+    #         # student_logits = full_logits[:1, -n_prop:]
+    #         student_logits = full_logits[:1, pos:]
+    #         student_predicted = student_logits.argmax(dim=-1)
+    #
+    #         # Verify last speculated tokens
+    #         if n_verify > 0:
+    #             assert n_verify == tgt_logits.shape[1] - 1
+    #             tgt_logits = self.adapt_logits(tgt_logits)
+    #             right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
+    #             right_bin_edges[..., -1] = 1
+    #             right_bin_edges[..., 0] = 0
+    #             z_idx = max_new_tokens - tokens_to_verify
+    #             z_rnd = z_rnd_all[:, z_idx:z_idx + n_verify + 1]
+    #             correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+    #             check_tokens = correct_tokens[:, :-1]
+    #             predict_tokens = prompt_ids[..., - n_verify:]
+    #             matches = (predict_tokens == check_tokens)
+    #             num_correct = matches.float().argmin(dim=1)
+    #             num_correct[matches.all(dim=1)] = n_verify
+    #             num_correct = int(num_correct[0])
+    #             # num_new = max(num_correct, 1)
+    #             num_new = num_correct + 1
+    #             # accuracy = matches[0].float().mean().item()
+    #             # tokens_to_verify -= num_new
+    #             tokens_to_verify -= num_correct
+    #             kv_cache.crop(int(prompt_ids.shape[-1] - (n_verify - num_correct)))
+    #             # if num_correct < n_verify:
+    #             #     prompt_ids = torch.cat([
+    #             #         prompt_ids[:, :-(n_verify - num_correct)],
+    #             #         correct_tokens[:, :num_new],
+    #             #     ], dim=1)
+    #             #     tokens_to_fill = tokens_to_verify
+    #             #     metrics['correct'] += [num_new]
+    #             # else:
+    #             if True:
+    #                 #
+    #                 student_predicted = student_predicted[:, -(num_correct + 1) * n_prop: student_predicted.shape[-1] - num_correct * n_prop]
+    #                 # Verify first speculated and add other speculated tokens
+    #                 match = student_predicted[0, 0] == correct_tokens[0, num_correct] if n_prop > 0 else False
+    #                 if not match:
+    #                     # assert not gated
+    #                     # Discard speculated tokens
+    #                     prompt_ids = torch.cat([
+    #                         prompt_ids[:, :prompt_ids.shape[1] - n_verify],
+    #                         correct_tokens[:, :num_correct+1],
+    #                     ], dim=1)
+    #                     tokens_to_verify -= 1
+    #                     tokens_to_fill = tokens_to_verify
+    #                 else:
+    #                     # Add new speculated tokens
+    #                     prompt_ids = torch.cat([
+    #                         prompt_ids[:, :prompt_ids.shape[1] - (n_verify - num_correct)],
+    #                         student_predicted,
+    #                     ], dim=1)
+    #                     tokens_to_fill = tokens_to_verify - n_prop
+    #                     tokens_to_verify -= 1
+    #                 metrics['correct'] += [num_new]
+    #             # metrics['accuracy'] += [accuracy]
+    #             if eos in prompt_ids[0, -num_new:]:
+    #                 break
+    #         else:
+    #             # Accept one token
+    #             tgt_logits = self.adapt_logits(tgt_logits[:, -1:])
+    #             right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
+    #             right_bin_edges[..., -1] = 1
+    #             right_bin_edges[..., 0] = 0
+    #             z_idx = max_new_tokens - tokens_to_verify
+    #             z_rnd = z_rnd_all[:, z_idx:z_idx + 1]
+    #             correct_token = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+    #             match = student_predicted[0, 0] == correct_token[0, 0]
+    #             kv_cache.crop(int(prompt_ids.shape[-1]))
+    #             if not match:
+    #                 # assert not gated
+    #                 # Discard speculated tokens
+    #                 prompt_ids = torch.cat([
+    #                     prompt_ids,
+    #                     correct_token,
+    #                 ], dim=1)
+    #                 tokens_to_verify -= 1
+    #                 tokens_to_fill = tokens_to_verify
+    #                 # metrics['accuracy'] += [0]
+    #             else:
+    #                 # Add new speculated tokens
+    #                 prompt_ids = torch.cat([
+    #                     prompt_ids,
+    #                     student_predicted,
+    #                 ], dim=1)
+    #                 tokens_to_fill = tokens_to_verify - n_prop
+    #                 tokens_to_verify -= 1
+    #                 # metrics['accuracy'] += [1]
+    #             metrics['correct'] += [1]
+    #
+    #     metrics = {
+    #         'completion': prompt_ids,
+    #         # 'accuracy': np.mean(metrics['accuracy']),
+    #         'correct_per_call': np.mean(metrics['correct']),
+    #         'correct_all': metrics['correct'],
+    #         'num_calls': len(metrics['correct']),
+    #     }
+    #
+    #     if return_metrics:
+    #         return input_ids, metrics
+    #     return input_ids
+
+    def proposals(self, student_p=None, n_verify=None, double_at=200, metrics=None):
+        """
+        Optimize proposals B wrt overhead adjusted expected # correct tokens
+        max_B [sum_i A_i * H(B_i)] / [1 + sum_i B_i / 50)]
+
+        If A_0 = 1 this becomes max_k H(k) / [1 + k / 50] = 14
+        """
+        # todo arange once
+        # Estimated probability of # correct tokens
+        if student_p is None:
+            A = self.hist_base
+            if n_verify is not None:
+                A = torch.cat([A[:n_verify], torch.tensor([A[n_verify:].sum()], device=device)])
+        else:
+            # assert student_p.shape[1] == n_verify
+            A = torch.ones(student_p.shape[1] + 1, device=device)
+            A[1:] = torch.cumprod(student_p[0], dim=-1)
+            A[:-1] *= 1 - student_p[0]
+        # Reward; Estimated # correct tokens in the next step given k proposed tokens
+        H_hist = torch.cumsum(self.hist_base * torch.arange(21, device=device), dim=-1)
+        # or: # proposed tokens
+        H_count = torch.arange(21, device=device)
+        # switch dynamically
+        if metrics is not None and len(metrics['Nrel']) > 0:
+            rho = np.clip((np.array(metrics['Nrel']).mean() - 0.2) / 0.2, 0, 1)
+        else:
+            rho = 0
+        H = (1 - rho) * H_hist + rho * H_count
+
+        # todo: add references for Dinkelbach?
+        lam_pre, lam = 0, 0
+        # todo _ = 3
+        for _ in range(20):
+            B = torch.argmax(A[:, None] * H[None, :self.tokens_per_student_call + 1] - lam * torch.arange(self.tokens_per_student_call + 1, device=A.device)[None, :] / 50, dim=1)
+            lam_pre = lam
+            lam = torch.sum(A * H[B]) / (1 + B.sum() / double_at)
+            if (lam_pre == lam).all():
+                break
+        return B
+
+    @torch.inference_mode()
+    def generate(self, batch, max_new_tokens, return_metrics=False, eos=None, **kwargs):
+        """
+        Efficient Quadratic Coding using kv-cached Gated LoRA
+        """
+        prompt_ids = batch['prompt_ids']
+        assert prompt_ids.shape[0] == 1, "Batch size must be 1"
+        assert self.student.shift_positions
+        metrics = {'correct': [], 'N': [], 'Nrel': []}
+        timing = {'step': [], 'call': []}
+        import time
+
+        # Verify in parallel
+        tokens_to_fill = max_new_tokens
+        tokens_to_verify = max_new_tokens
+        z_rnd_all = torch.rand([prompt_ids.shape[0], max_new_tokens + self.tokens_per_student_call], device=device, dtype=torch.float32)
+        n_props = self.proposals(n_verify=0)
+
+        # Fill caches
+        # kv_cache = DynamicCache()
+        scall = time.time()
+        self.student.set_gate_window(0)
+        self.student.set_mode('teacher')
+        outputs = self.student(
+            input_ids=prompt_ids[:, :-1],
+            use_cache=True,
+            auxiliaries=z_rnd_all[:, :0],
+        )
+        kv_cache = outputs.past_key_values
+        # torch.cuda.synchronize()
+        timing['call'] += [time.time() - scall]
+
+        while tokens_to_verify > 0:
+            s = time.time()
+            n_props = torch.clip(n_props, max=torch.arange(tokens_to_verify, tokens_to_verify - n_props.shape[0], -1, device=device, dtype=int))
+            n_props = torch.clip(n_props, min=0)
+            n_verify = tokens_to_verify - tokens_to_fill
+            assert n_verify == n_props.shape[0] - 1
+            seq_len = prompt_ids.shape[1] + n_props.sum()
+            pos = prompt_ids.shape[1] - kv_cache.get_seq_length()
+            metrics['N'] += [pos + n_props.sum()]
+
+            # Prepare inputs
+            z_idx = max_new_tokens - tokens_to_verify
+            z_rnd = torch.cat([z_rnd_all[:, z_idx + d:z_idx + d + n_prop] for d, n_prop in enumerate(n_props)], dim=1)
+            input_ids = prompt_ids[:, kv_cache.get_seq_length():]
+            midx = pos
+            # todo: in-place
+            input_mask = torch.tril(torch.ones(seq_len - kv_cache.get_seq_length(), seq_len, device=device), diagonal=kv_cache.get_seq_length())
+            input_position_ids = torch.arange(kv_cache.get_seq_length(), seq_len, device=device)[None, :]
+            for d, n_prop in enumerate(n_props):
+                input_mask[midx: midx + n_prop, prompt_ids.shape[1] - n_verify + d:kv_cache.get_seq_length() + midx] = 0
+                input_position_ids[:, midx: midx + n_prop] -= midx - pos + n_verify - d + 1
+                midx += n_prop
+            input_mask = (1 - input_mask[None, None, :, :].to(torch.float16)) * -1e15
+
+            # Student proposals
+            scall = time.time()
+            self.student.set_gate_window(n_props.sum().item())
+            self.student.set_mode('student')
+            # outputs = TransformerModel.forward(self.student,
+            outputs = self.student(
+                input_ids=input_ids,
+                attention_mask=input_mask,
+                position_ids=input_position_ids,
+                auxiliaries=z_rnd,
+                past_key_values=kv_cache,
+                use_cache=True
+            )
+            # torch.cuda.synchronize()
+            timing['call'] += [time.time() - scall]
+
+            kv_cache = outputs.past_key_values
+            full_logits = outputs.logits
+            tgt_logits = full_logits[-1:, :pos]
+            # O-PTP
+            assert 'bc' in self.loss_type
+            student_logits = full_logits[:1, pos:]
+            student_predicted = student_logits.argmax(dim=-1)
+            student_p = torch.softmax(student_logits, dim=-1)[0, range(n_props.sum()), student_predicted]
+
+            # Verify last speculated tokens
+            if n_verify > 0:
+                assert n_verify == tgt_logits.shape[1] - 1
+                tgt_logits = self.adapt_logits(tgt_logits)
+                right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
+                right_bin_edges[..., -1] = 1
+                right_bin_edges[..., 0] = 0
+                z_idx = max_new_tokens - tokens_to_verify
+                z_rnd = z_rnd_all[:, z_idx:z_idx + n_verify + 1]
+                correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+                check_tokens = correct_tokens[:, :-1]
+                predict_tokens = prompt_ids[..., - n_verify:]
+                matches = (predict_tokens == check_tokens)
+                num_correct = matches.float().argmin(dim=1)
+                num_correct[matches.all(dim=1)] = n_verify
+                num_correct = int(num_correct[0])
+                num_new = num_correct + 1
+                tokens_to_verify -= num_correct
+                kv_cache.crop(int(prompt_ids.shape[-1] - (n_verify - num_correct)))
+                ths_student_predicted = student_predicted[:, n_props[:num_correct].sum(): n_props[:num_correct].sum() + n_props[num_correct]]
+                ths_student_p = student_p[:, n_props[:num_correct].sum(): n_props[:num_correct].sum() + n_props[num_correct]]
+                metrics['Nrel'] += [(num_correct / n_verify).item()]
+                # Verify first speculated and add other speculated tokens
+                if n_props[num_correct] > 0:
+                    ths_student_predicted[0, 0] = correct_tokens[0, num_correct]
+                    match = ths_student_predicted[0, 0] == correct_tokens[0, num_correct]
+                else:
+                    match = False
+                if not match:
+                    # Discard speculated tokens
+                    prompt_ids = torch.cat([
+                        prompt_ids[:, :prompt_ids.shape[1] - n_verify],
+                        correct_tokens[:, :num_correct + 1],
+                    ], dim=1)
+                    tokens_to_verify -= 1
+                    tokens_to_fill = tokens_to_verify
+                    n_props = self.proposals(n_verify=0, metrics=metrics)
+                else:
+                    # Add new speculated tokens
+                    prompt_ids = torch.cat([
+                        prompt_ids[:, :prompt_ids.shape[1] - (n_verify - num_correct)],
+                        ths_student_predicted,
+                    ], dim=1)
+                    tokens_to_fill = tokens_to_verify - n_props[num_correct]
+                    tokens_to_verify -= 1
+                    n_props = self.proposals(ths_student_p[:, 1:], metrics=metrics)
+                metrics['correct'] += [num_new]
+                if eos in correct_tokens[:, :num_correct + 1]:
+                    break
+            else:
+                # Accept one token
+                tgt_logits = self.adapt_logits(tgt_logits[:, -1:])
+                right_bin_edges = torch.softmax(tgt_logits, dim=-1).cumsum(dim=-1)
+                right_bin_edges[..., -1] = 1
+                right_bin_edges[..., 0] = 0
+                z_idx = max_new_tokens - tokens_to_verify
+                z_rnd = z_rnd_all[:, z_idx:z_idx + 1]
+                correct_token = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+                kv_cache.crop(int(prompt_ids.shape[-1]))
+                if student_predicted.shape[1] > 0:
+                    student_predicted[0, 0] = correct_token[0, 0]
+                    match = student_predicted[0, 0] == correct_token[0, 0]
+                else:
+                    match = False
+                if not match:
+                    # Discard speculated tokens
+                    prompt_ids = torch.cat([
+                        prompt_ids,
+                        correct_token,
+                    ], dim=1)
+                    tokens_to_verify -= 1
+                    tokens_to_fill = tokens_to_verify
+                    n_props = self.proposals(n_verify=0, metrics=metrics)
+                else:
+                    # Add new speculated tokens
+                    prompt_ids = torch.cat([
+                        prompt_ids,
+                        student_predicted[:, :n_props[0]],
+                    ], dim=1)
+                    tokens_to_fill = tokens_to_verify - n_props[0]
+                    tokens_to_verify -= 1
+                    n_props = self.proposals(student_p[:, 1:], metrics=metrics)
+                metrics['correct'] += [1]
+                if eos == correct_token[0, 0]:
+                    break
+
+            # torch.cuda.synchronize()
+            timing['step'] += [time.time() - s]
+
+        print(1000 * np.mean(timing['step'][1:]), 1000 * np.mean(timing['call'][1:]))
+        metrics = {
+            'completion': prompt_ids,
+            'correct_per_call': np.mean(metrics['correct']),
+            'correct_all': metrics['correct'],
+            'num_calls': len(metrics['correct']),
         }
 
         if return_metrics:

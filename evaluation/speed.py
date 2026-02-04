@@ -2,6 +2,68 @@ import json
 import argparse
 from transformers import AutoTokenizer
 import numpy as np
+import re
+
+def get_last_number(text):
+    matches = re.findall(r'-?\d+(?:,\d{3})*(?:\.\d+)?', text)
+    if not matches:
+        return np.nan
+    num = matches[-1].replace(',', '')
+    if '.' in num:
+        return float(num)
+    return int(num)
+
+def correctness(jsonl_file, jsonl_file_base, tokenizer_path, report=True):
+    task = 'math_reasoning'
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+
+    from fastchat.llm_judge.common import load_questions
+    questions = load_questions('../data/spec_bench/question.jsonl', None, None)
+    all_correct_answers = {401: 1000, 402: 5, 403: 306, 404: 7, 405: 3, 406: 2, 407: 6, 408: 1000, 409: 26, 410: 72, 411: 22, 412: 25, 413: 110, 414: 10, 415: 5, 416: 2, 417: 5, 418: -3, 419: 240, 420: 320, 421: 4, 422: 284, 423: 7, 424: 1300, 425: 30, 426: 5, 427: 19, 428: 95200, 429: 385000, 430: 84, 431: 15, 432: 34, 433: 84, 434: 360, 435: 132, 436: 4, 437: 36, 438: 8, 439: 1110, 440: 120, 441: 132, 442: 10, 443: 54, 444: 3, 445: 2, 446: 40, 447: 4, 448: 40, 449: 623, 450: 9, 451: 18, 452: 36, 453: 35, 454: 80, 455: 120, 456: 40, 457: 15, 458: 21, 459: 120, 460: 20, 461: 6, 462: 40, 463: 5, 464: 336, 465: 40, 466: 350, 467: 7, 468: 5, 469: 100, 470: 105, 471: 16, 472: 8, 473: 250, 474: 48, 475: 5760, 476: 13, 477: 360, 478: 36, 479: 762, 480: 576}
+
+    data = []
+    with open(jsonl_file, 'r', encoding='utf-8') as file:
+        for line in file:
+            json_obj = json.loads(line)
+            if json_obj["category"] == task:
+                data.append(json_obj)
+
+    student_answers = []
+    for datapoint in data:
+        text = datapoint["choices"][0]['turns'][0]
+        if datapoint['question_id'] not in all_correct_answers:
+            for q in questions:
+                if q['question_id'] == datapoint['question_id']:
+                    print(q['question_id'])
+                    print(q['turns'][0])
+                    all_correct_answers[q['question_id']] = int(input())
+        answer = get_last_number(text)
+        student_answers += [answer]
+
+    data = []
+    with open(jsonl_file_base, 'r', encoding='utf-8') as file:
+        for line in file:
+            json_obj = json.loads(line)
+            if json_obj["category"] == task:
+                data.append(json_obj)
+
+    base_answers = []
+    correct_answers = []
+    for datapoint in data:
+        text = datapoint["choices"][0]['turns'][0]
+        answer = get_last_number(text)
+        base_answers += [answer]
+        correct_answers += [all_correct_answers[datapoint['question_id']]]
+
+    student_answers = np.array(student_answers)
+    base_answers = np.array(base_answers)
+    correct_answers = np.array(correct_answers)
+    if report:
+        print("="*30, "Task: ", task, "="*30)
+        print("Answer Correct: %.2f %%"  % (100 * np.mean(student_answers == correct_answers)))
+        print("Answer Match  : %.2f %%" % (100 * np.mean(student_answers == base_answers)))
+        print("Base   Correct: %.2f %%" % (100 * np.mean(correct_answers == base_answers)))
+    return
 
 
 def speed(jsonl_file, jsonl_file_base, tokenizer, task=None, report=True):
@@ -125,13 +187,18 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--file-path",
-        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-float16-temp-0.7-lorag8.jsonl',
+        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-float16-temp-0.7-lorag128_paper_fast.jsonl',
+        # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-medusa-float16-temperature-0.7.jsonl',
+        # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-pld-float16.jsonl',
+        # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-sps-68m-float16-temp-0.7.jsonl',
+        # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-lade-level-5-win-7-guess-7-float16.jsonl',
         type=str,
         help="The file path of evaluated Speculative Decoding methods.",
     )
     parser.add_argument(
         "--base-path",
         default='../data/spec_bench/model_answer/vicuna-7b-v1.5-vanilla-float16-temp-0.7.jsonl',
+        # default='../data/spec_bench/model_answer/vicuna-7b-vanilla-float16-temp-0.7-m6.jsonl',
         type=str,
         help="The file path of evaluated baseline.",
     )
@@ -152,3 +219,4 @@ if __name__ == "__main__":
         get_mean_speedup()
     else:
         get_single_speedup(jsonl_file=args.file_path, jsonl_file_base=args.base_path, tokenizer_path=args.tokenizer_path)
+    correctness(jsonl_file=args.file_path, jsonl_file_base=args.base_path, tokenizer_path=args.tokenizer_path)
