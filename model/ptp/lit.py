@@ -1018,7 +1018,7 @@ class ParallelSamplingLightningModule(LightningModule):
         prompt_ids = batch['prompt_ids']
         assert prompt_ids.shape[0] == 1, "Batch size must be 1"
         assert self.student.shift_positions
-        metrics = {'correct': [], 'N': [], 'Nrel': []}
+        metrics = {'correct': [], 'N': [], 'Nrel': [], 'off': [], 'offp': []}
         timing = {'step': [], 'call': []}
         import time
 
@@ -1115,11 +1115,18 @@ class ParallelSamplingLightningModule(LightningModule):
                 metrics['Nrel'] += [(num_correct / n_verify).item()]
                 # Verify first speculated and add other speculated tokens
                 if n_props[num_correct] > 0:
-                    ths_student_predicted[0, 0] = correct_tokens[0, num_correct]
+                    # ths_student_predicted[0, 0] = correct_tokens[0, num_correct]
                     match = ths_student_predicted[0, 0] == correct_tokens[0, num_correct]
                 else:
                     match = False
                 if not match:
+                    # if n_props[num_correct] > 0:
+                    #     ths_student_ps = torch.softmax(student_logits[:, n_props[:num_correct].sum()], dim=-1)
+                    #     sorted = ths_student_ps[0].argsort(descending=True)
+                    #     idx = torch.where(sorted == correct_tokens[0, num_correct])[0][0].item()
+                    #     metrics['off'] += [idx]
+                    #     metrics['offp'] += [ths_student_ps[0, sorted[idx]]]
+
                     # Discard speculated tokens
                     prompt_ids = torch.cat([
                         prompt_ids[:, :prompt_ids.shape[1] - n_verify],
@@ -1181,6 +1188,7 @@ class ParallelSamplingLightningModule(LightningModule):
             timing['step'] += [time.time() - s]
 
         print(1000 * np.mean(timing['step'][1:]), 1000 * np.mean(timing['call'][1:]))
+        # plt.scatter(metrics['off'], metrics['offp'], s=2, alpha=0.5); plt.gca().set(xlabel='If the predicted token is wrong, the k-th one after is', ylabel='student confidence for actual correct token'); plt.show()
         metrics = {
             'completion': prompt_ids,
             'correct_per_call': np.mean(metrics['correct']),

@@ -113,7 +113,7 @@ class GatedLinearLoraOld(lora.Linear):
         return (slice(None), slice((x.shape[1] - self.gate_window()), x.shape[1]), slice(None))
         # return (slice(0, (x.shape[0] + 1) // 2), slice(None), slice(None))
 
-class GatedLinearLora(lora.Linear):
+class GatedLinearLora_Old(lora.Linear):
     GATE_WINDOW = None
     MODE = 'student'
 
@@ -171,12 +171,18 @@ class GatedLinearLora(lora.Linear):
 
 
 class GatedLinearLora_(lora.Linear):
+    """
+    Weights in one bigger matrix, output needs an in-place copy
+    """
+
     GATE_WINDOW = None
+    MODE = None
 
     @torch.inference_mode()
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         res = self.base_layer(x)
-        res[..., res.shape[-2] - GatedLinearLora.GATE_WINDOW:, :self.base_layer.out_features // 2] = res[..., res.shape[-2] - GatedLinearLora.GATE_WINDOW:, self.base_layer.out_features // 2:]
+        if GatedLinearLora.GATE_WINDOW > 0:
+            res[..., res.shape[-2] - GatedLinearLora.GATE_WINDOW:, :self.base_layer.out_features // 2] = res[..., res.shape[-2] - GatedLinearLora.GATE_WINDOW:, self.base_layer.out_features // 2:]
         return res[..., :self.base_layer.out_features // 2]
 
     def unload_and_optionally_merge_module(self, **kwargs):
@@ -189,9 +195,12 @@ class GatedLinearLora_(lora.Linear):
             self.base_layer.weight.data.copy_(new_weight)
         return self
 
-class GatedLinearLora_(lora.Linear):
+class GatedLinearLora(lora.Linear):
+    """
+    Separate layers, output need to be combined
+    """
     GATE_WINDOW = None
-    MODE = 'student'
+    MODE = None
 
     def __init__(self, *args, gate_window = None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -200,12 +209,24 @@ class GatedLinearLora_(lora.Linear):
         self.lora_linear = torch.nn.Linear(self.base_layer.in_features, self.base_layer.out_features, bias=False)
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
-        # res1 = self.base_layer(x[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :])
-        # res2 = self.lora_linear(x[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :])
+        # # res1 = self.base_layer(x[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :])
+        # res1 = self.base_layer(x)[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :]
+        # # res2 = self.lora_linear(x[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :])
+        # res2 = self.lora_linear(x)[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :]
         # return torch.cat([res1, res2], dim=-2)
+
         # faster to do more computation here so we can avoid a cat op
-        res = self.base_layer(x)
-        res[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :] = self.lora_linear(x[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :])
+        # res = self.base_layer(x)
+        # if GatedLinearLora.GATE_WINDOW > 0:
+        #     # res[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :] =  self.lora_linear(x[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :])
+        #     res2 = self.lora_linear(x[..., x.shape[-2] - GatedLinearLora.GATE_WINDOW:, :])
+
+        if GatedLinearLora.GATE_WINDOW > 0:
+            res = self.lora_linear(x)
+            res[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :] =  self.base_layer(x[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :])
+            # res[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :] = self.base_layer(x)[..., :x.shape[-2] - GatedLinearLora.GATE_WINDOW, :]
+        else:
+            res = self.base_layer(x)
         return res
 
     def unload_and_optionally_merge_module(self, **kwargs):

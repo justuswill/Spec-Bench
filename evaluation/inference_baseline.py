@@ -18,33 +18,33 @@ def baseline_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, 
     input_ids = inputs.input_ids
     import time
     s = time.time()
-    output_ids = model.generate(
-        input_ids,
-        do_sample=do_sample,
-        temperature=temperature,
-        max_new_tokens=max_new_tokens,
-    )
-    # timing = {'call': []}
-    # past_key_values = None
-    # generated = input_ids
-    # for step in range(max_new_tokens):
-    #     scall = time.time()
-    #     outputs = model(
-    #         input_ids=generated[:, -1:] if past_key_values is not None else generated,
-    #         past_key_values=past_key_values,
-    #         use_cache=True,
-    #     )
-    #     # torch.cuda.synchronize()
-    #     timing['call'] += [time.time() - scall]
-    #     logits = outputs.logits[:, -1, :]
-    #     past_key_values = outputs.past_key_values
-    #     next_token = torch.argmax(logits, dim=-1, keepdim=True)
-    #     generated = torch.cat([generated, next_token], dim=-1)
-    #     if next_token.item() == tokenizer.eos_token_id:
-    #         break
-    # output_ids = generated
+    # output_ids = model.generate(
+    #     input_ids,
+    #     do_sample=do_sample,
+    #     temperature=temperature,
+    #     max_new_tokens=max_new_tokens,
+    # )
+    timing = {'call': []}
+    past_key_values = None
+    generated = input_ids
+    for step in range(max_new_tokens):
+        scall = time.time()
+        outputs = model(
+            input_ids=generated[:, -1:] if past_key_values is not None else generated,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+        timing['call'] += [time.time() - scall]
+        logits = outputs.logits[:, -1, :]
+        past_key_values = outputs.past_key_values
+        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        generated = torch.cat([generated, next_token], dim=-1)
+        if next_token.item() == tokenizer.eos_token_id:
+           break
 
-    # torch.cuda.synchronize()
+    output_ids = generated
+
+    torch.cuda.synchronize()
     timed = time.time() - s
     new_token = len(output_ids[0][len(input_ids[0]):])
     print(timed, new_token/timed, 1000 * timed/new_token)

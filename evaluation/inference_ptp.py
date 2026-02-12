@@ -8,6 +8,7 @@ import argparse
 from evaluation.eval import run_eval, reorg_answer_file
 from fastchat.utils import str_to_torch_dtype
 
+from model.ptp.transformer import GatedLinearLora, TransformerModel
 from model.ptp.utils import instantiate
 import os
 from omegaconf import DictConfig
@@ -62,26 +63,31 @@ def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temper
         #     input_ids=inputs['input_ids'][:, :10],
         #     auxiliaries=torch.rand([1, 16], device='cuda', dtype=torch.float32)
         # )
+
         # import time
+        # # torch.cuda.set_sync_debug_mode(2)
+        # ths_u = torch.rand([1, 1], device='cuda', dtype=torch.float32)
         # s = time.time()
         # past_key_values = None
         # generated = inputs['input_ids']
-        # n_ths = 1
-        # model.student._gated_window = n_ths
-        # model.student._mode = 'student'
+        # n_ths = 40
+        # GatedLinearLora.GATE_WINDOW = n_ths
+        # GatedLinearLora.MODE = 'student'
         # for step in range(1024):
-        #     outputs = model.student(
-        #         input_ids=generated[:, -1:] if past_key_values is not None else generated,
+        #     outputs = TransformerModel.forward(model.student,
+        #     # outputs = model.student(
+        #         input_ids=generated[:, -50:] if past_key_values is not None else generated,
         #         past_key_values=past_key_values,
         #         use_cache=True,
-        #         auxiliaries=torch.rand([1, n_ths], device='cuda', dtype=torch.float32)
+        #         # auxiliaries=ths_u
         #     )
-        #     logits = outputs.logits[:, -n_ths-1, :]
+        #     # logits = outputs.logits[:, -n_ths-1, :]
+        #     logits = outputs['logits'][:, -1, :]
         #     past_key_values = outputs.past_key_values
         #     probs = torch.softmax(logits, dim=-1)
         #     next_token = torch.multinomial(probs, num_samples=1)
         #     # next_token = torch.argmax(logits, dim=-1, keepdim=True)
-        #     past_key_values.crop(generated.shape[1])
+        #     past_key_values.crop(generated.shape[1] - 49)
         #     generated = torch.cat([generated, next_token], dim=-1)
         #     # if next_token.item() == tokenizer.eos_token_id:
         #     #     break
@@ -89,6 +95,7 @@ def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temper
         # torch.cuda.synchronize()
         # timed = time.time() - s
         # new_token = len(output_ids[0][len(inputs['input_ids'][0]):])
+        # accept_length_list = [1]
         # print(timed, new_token / timed, 1000 * timed / new_token)
 
         metrics = model.generate(
