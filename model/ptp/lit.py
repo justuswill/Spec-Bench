@@ -1109,7 +1109,7 @@ class ParallelSamplingLightningModule(LightningModule):
             n_props = self.proposals(n_verify=0, num_tokens=num_proposed_tokens)
 
         # Fill caches
-        if self.past_kv_cache is not None:
+        if self.past_kv_cache is not None and False:
             past_prompt_ids, past_kv_cache = self.past_kv_cache
             end = min(past_prompt_ids.shape[1], prompt_ids.shape[1])
             match = past_prompt_ids[:, :end] == past_prompt_ids[:, :end]
