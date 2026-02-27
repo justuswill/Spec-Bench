@@ -107,15 +107,6 @@ def get_model_answers(
             input_ids = inputs.input_ids
 
             # try:
-            # if forward_func.__name__ == 'ptp_forward':
-            #     forward_func(
-            #         inputs,
-            #         model,
-            #         tokenizer,
-            #         max_new_tokens,
-            #         **kwargs,
-            #         prepare=True,
-            #     )
             torch.cuda.synchronize()
             start_time = time.time()
             output_ids, new_token, step, accept_length_tree = forward_func(

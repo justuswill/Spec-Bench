@@ -113,9 +113,8 @@ class GatedLinearLoraOld(lora.Linear):
         return (slice(None), slice((x.shape[1] - self.gate_window()), x.shape[1]), slice(None))
         # return (slice(0, (x.shape[0] + 1) // 2), slice(None), slice(None))
 
-class GatedLinearLora_Old(lora.Linear):
+class GatedLinearLora_stack(lora.Linear):
     GATE_WINDOW = None
-    MODE = 'student'
 
     def __init__(self, *args, gate_window = None, merge=False, mode=None, **kwargs):
         super().__init__(*args, **kwargs)
@@ -159,7 +158,7 @@ class GatedLinearLora_Old(lora.Linear):
         # result[x_msk] += lora_result
 
         assert not self.merged
-        if GatedLinearLora.MODE == 'teacher':
+        if GatedLinearLora.GATE_WINDOW == 0:
             result = x @ self.mixed_weight[1:].transpose(1, 2)
         else:
             result = x @ self.mixed_weight.transpose(1, 2)
@@ -170,7 +169,7 @@ class GatedLinearLora_Old(lora.Linear):
         return self
 
 
-class GatedLinearLora_(lora.Linear):
+class GatedLinearLora_sep(lora.Linear):
     """
     Weights in one bigger matrix, output needs an in-place copy
     """
@@ -195,7 +194,7 @@ class GatedLinearLora_(lora.Linear):
             self.base_layer.weight.data.copy_(new_weight)
         return self
 
-class GatedLinearLora(lora.Linear):
+class GatedLinearLoraCat(lora.Linear):
     """
     Separate layers, output need to be combined
     """
@@ -238,6 +237,70 @@ class GatedLinearLora(lora.Linear):
         return self
 
 
+class GatedLinearLoraMerged(nn.Module):
+    def __init__(self, inner: nn.Linear, lora_a: nn.Linear, lora_b: nn.Linear, scaling, gate_window: int) -> None:
+        super().__init__()
+        self.gate_window  = gate_window
+        self.out_features = inner.out_features
+        self.rank         = lora_a.out_features   # = LORA_RANK = 128
+
+        # Precompute W_fused = W_inner + W_B @ W_A, then merge with W_A.
+        # Shape: (out + rank, in).
+        with torch.no_grad():
+            W_fused = inner.weight.float() + scaling * (lora_b.weight.float() @ lora_a.weight.float())
+            W_fused = W_fused.to(inner.weight.dtype)
+            W_merged = torch.cat([W_fused, lora_a.weight], dim=0)
+
+        self.register_buffer("W_merged", W_merged)   # (out + rank, in)
+        # lora_b stays as a module so it participates in .to(dtype) etc.
+        self.lora_scaling = scaling
+        self.lora_b = lora_b
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gw   = self.gate_window
+        out  = self.out_features
+        rank = self.rank
+
+        # -----------------------------------------------------------------
+        # 1. Single merged GEMM: x → (B, T, out + rank)
+        #    y_fused already includes the LoRA contribution for all tokens.
+        # -----------------------------------------------------------------
+        merged = torch.functional.F.linear(x, self.W_merged)     # (B, T, out + rank)
+
+        # -----------------------------------------------------------------
+        # 2. Split the merged output (views, no copies).
+        # -----------------------------------------------------------------
+        y     = merged[..., :out]               # (B, T, out)  – fused result
+        h_all = merged[..., out:]               # (B, T, rank) – lora_a for all tokens
+
+        if gw == 0 or gw >= x.shape[-2]:
+            # All tokens gated (or none) — no correction needed.
+            return y
+
+        # -----------------------------------------------------------------
+        # 3. Subtract LoRA from non-gated tokens (the first T - gw).
+        #    This is the small correction GEMM: only (T - gw) tokens.
+        # -----------------------------------------------------------------
+        non_gated = x.shape[-2] - gw
+        h_non_gated = h_all[:, :non_gated, :]          # (B, T-gw, rank)
+        y[:, :non_gated, :] -= self.lora_scaling * self.lora_b(h_non_gated)  # in-place subtract
+
+        return y
+
+class GatedLinearLora(lora.Linear):
+    """
+    Partially merged LoRA
+    """
+    GATE_WINDOW = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def unload_and_optionally_merge_module(self, **kwargs):
+        assert self.GATE_WINDOW is not None
+        return GatedLinearLoraMerged(self.base_layer, self.lora_A['default'], self.lora_B['default'], self.scaling['default'], gate_window=self.GATE_WINDOW)
+
+
 class BatchGatedLinearLora(GatedLinearLora):
 
     def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
@@ -258,12 +321,11 @@ class TransformerModel(torch.nn.Module):
             self.tokenizer = None
             self.model = model_id
         else:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=False)
             # Use torch_dtype parameter for Hugging Face compatibility
             self.model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, low_cpu_mem_usage=True, **kwargs)
             if reset_parameters:
                 self.model = AutoModelForCausalLM.from_config(self.model.config)
-
         # return
 
         # Enable gradient checkpointing to save memory (trades compute for memory)

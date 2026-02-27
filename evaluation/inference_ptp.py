@@ -17,107 +17,73 @@ import torch
 
 STPS = []
 
-def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temperature=0.0, prepare=False):
-    # if not list(model.teacher.parameters())[0].device.type == 'cuda':
-    #     model.to('cuda')
-    if prepare:
-        return
-        # outputs = model.teacher.generate(
-        #     input_ids=inputs.input_ids,
-        #     max_new_tokens=max_new_tokens,
-        #     do_sample=True,
-        #     # pad_token_id=tokenizer.eos_token_id,
-        #     temperature=temperature,
-        #     top_p=model.top_p,
-        #     top_k=model.top_k,
-        #     output_scores=True,
-        #     return_dict_in_generate=True,
-        #     num_return_sequences=1,
-        #     use_cache=True,
-        # )
-        # chunk_ids = outputs.sequences[:, inputs.input_ids.shape[1]:]
-        # scores = torch.stack(outputs.scores, dim=1)
-        # probs = torch.softmax(scores, dim=-1)
-        # selector = (
-        #     torch.arange(probs.shape[0], device=probs.device)[:, None],
-        #     torch.arange(probs.shape[1], device=probs.device)[None, :],
-        #     chunk_ids
-        # )
-        # assert (probs[selector] > 0).all(), "Some token has zero probability"
-        # cum_probs = probs.cumsum(-1)
-        #
-        # model.prep_completion_ids = chunk_ids
-        # model.prep_left_bin_edges = cum_probs[selector] - probs[selector]
-        # model.prep_right_bin_edges = cum_probs[selector]
-        # return
-    else:
-        model.temperature = temperature
+def ptp_test(inputs, model):
+    """
+    Simplified testing setup for wall clock experiments
+    """
+    # model.student._gated_window = 16
+    # outputs = model.student(
+    #     input_ids=inputs['input_ids'][:, :10],
+    #     auxiliaries=torch.rand([1, 16], device='cuda', dtype=torch.float32)
+    # )
 
-        # input_ids = torch.tensor(tokenizer.encode("A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions.\nUSER: How can cross training benefit groups like runners, swimmers, or weightlifters?\nASSISTANT: "))[None, :].to('cuda')
-        import time
-        s = time.time()
-        # metrics = model.timed_error_correction({'prompt_ids': input_ids}, tokens_to_fill=max_new_tokens, eos=tokenizer.eos_token_id)
+    import time
+    # torch.cuda.set_sync_debug_mode(2)
+    ths_u = torch.rand([1, 40], device='cuda', dtype=torch.float32)
+    s = time.time()
+    past_key_values = None
+    generated = inputs['input_ids']
+    n_ths = 40
+    GatedLinearLora.GATE_WINDOW = n_ths
+    for step in range(1024):
+        # outputs = TransformerModel.forward(model.student,
+        outputs = model.student(
+            input_ids=generated[:, -10:] if past_key_values is not None else generated,
+            past_key_values=past_key_values,
+            use_cache=True,
+            auxiliaries=ths_u
+        )
+        logits = outputs.logits[:, -n_ths-1, :]
+        past_key_values = outputs.past_key_values
+        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        past_key_values.crop(generated.shape[1] - 49)
+        generated = torch.cat([generated, next_token], dim=-1)
+    output_ids = generated
+    torch.cuda.synchronize()
+    timed = time.time() - s
+    new_token = len(output_ids[0][len(inputs['input_ids'][0]):])
+    accept_length_list = [1]
+    print(timed, new_token / timed, 1000 * timed / new_token)
+    return output_ids, new_token, step, accept_length_list
 
-        # model.student._gated_window = 16
-        # outputs = model.student(
-        #     input_ids=inputs['input_ids'][:, :10],
-        #     auxiliaries=torch.rand([1, 16], device='cuda', dtype=torch.float32)
-        # )
+def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temperature=0.0):
+    model.temperature = temperature
+    # return ptp_test()
 
-        # import time
-        # # torch.cuda.set_sync_debug_mode(2)
-        # ths_u = torch.rand([1, 1], device='cuda', dtype=torch.float32)
-        # s = time.time()
-        # past_key_values = None
-        # generated = inputs['input_ids']
-        # n_ths = 40
-        # GatedLinearLora.GATE_WINDOW = n_ths
-        # GatedLinearLora.MODE = 'student'
-        # for step in range(1024):
-        #     outputs = TransformerModel.forward(model.student,
-        #     # outputs = model.student(
-        #         input_ids=generated[:, -50:] if past_key_values is not None else generated,
-        #         past_key_values=past_key_values,
-        #         use_cache=True,
-        #         # auxiliaries=ths_u
-        #     )
-        #     # logits = outputs.logits[:, -n_ths-1, :]
-        #     logits = outputs['logits'][:, -1, :]
-        #     past_key_values = outputs.past_key_values
-        #     probs = torch.softmax(logits, dim=-1)
-        #     next_token = torch.multinomial(probs, num_samples=1)
-        #     # next_token = torch.argmax(logits, dim=-1, keepdim=True)
-        #     past_key_values.crop(generated.shape[1] - 49)
-        #     generated = torch.cat([generated, next_token], dim=-1)
-        #     # if next_token.item() == tokenizer.eos_token_id:
-        #     #     break
-        # output_ids = generated
-        # torch.cuda.synchronize()
-        # timed = time.time() - s
-        # new_token = len(output_ids[0][len(inputs['input_ids'][0]):])
-        # accept_length_list = [1]
-        # print(timed, new_token / timed, 1000 * timed / new_token)
+    import time
+    s = time.time()
+    # metrics = model.generate_old(
+    metrics = model.generate(
+    # metrics=model.generate_tree(
+        {'prompt_ids': inputs.input_ids},
+        max_new_tokens=max_new_tokens,
+        return_metrics=True,
+        eos=tokenizer.eos_token_id,
+        # gated=True,
+        # correcting_via='u',
+        # collect_stats=True
+    )[1]
+    output_ids = metrics['completion']
+    step = metrics['num_calls']
+    accept_length_list = metrics['correct_all']
+    new_token = sum(accept_length_list)
+    # torch.cuda.synchronize()
+    timed = time.time() - s
 
-        metrics = model.generate(
-            {'prompt_ids': inputs.input_ids,
-             # 'completion_ids': model.prep_completion_ids,'left_bin_edges':model.prep_left_bin_edges, 'right_bin_edges':model.prep_right_bin_edges
-             },
-            max_new_tokens=max_new_tokens, return_metrics=True, eos=tokenizer.eos_token_id, gated=True, correcting_via='u', collect_stats=True)[1]
-        output_ids = metrics['completion']
-        step = metrics['num_calls']
-        accept_length_list = metrics['correct_all']
-        new_token = sum(accept_length_list)
+    # global STPS
+    # STPS += [metrics['STP']]
+    print('%.2f #accept/step, %.2f ms/call' % (new_token / step, 1000 * timed / step))
 
-        # global STPS
-        # STPS += [metrics['STP']]
-
-        # model.prep_completion_ids = None
-        # model.prep_left_bin_edges = None
-        # model.prep_right_bin_edges = None
-
-        # torch.cuda.synchronize()
-        timed = time.time() - s
-        print(timed, new_token / timed, 1000 * timed / step)
     return output_ids, new_token, step, accept_length_list
 
 
@@ -206,20 +172,22 @@ if __name__ == "__main__":
     # ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r128/gated/epoch=424.ckpt'), map_location='cuda')
     # ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-ultrachat-lora-r128/epoch=484.ckpt'), map_location='cuda')
     ckpt = torch.load(os.path.join(args.student_path, 'vicuna-7b-sharegpt-lora-r128/gated/epoch=140.ckpt'), map_location='cuda')
+
     # mistakes = lit_model.load_state_dict({k.replace('model.base_model.', '').replace('base_layer.', ''): v for k, v in ckpt['state_dict'].items()}, strict=False)
     # mistakes = lit_model.load_state_dict({k.replace('base_layer.', ''): v for k, v in ckpt['state_dict'].items()}, strict=False)
     mistakes = lit_model.load_state_dict(ckpt['state_dict'], strict=False)
-    assert all(key.startswith('teacher') or 'lora_linear' in key for key in mistakes.missing_keys)
+    assert all(key.startswith('teacher') or 'lora_linear' in key or 'lora_b' in key for key in mistakes.missing_keys)
 
     tokenizer = lit_model.student.tokenizer
 
     # lit_model.teacher.eval()
     lit_model.student.eval()
+    # Fixed number of tokens per call, optimizing kernels
+    lit_model.student.set_gate_window(50)
     lit_model.student.model.merge_and_unload(progressbar=True)
-    # lit_model.teacher.compile()
-    # lit_model.student.compile()
     lit_model.to(str_to_torch_dtype(args.dtype))
     lit_model.to('cuda')
+    lit_model.student = torch.compile(lit_model.student, mode="default")
 
     if args.temperature > 0:
         do_sample = True
