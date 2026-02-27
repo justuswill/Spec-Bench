@@ -1113,8 +1113,8 @@ class ParallelSamplingLightningModule(LightningModule):
             past_prompt_ids, past_kv_cache = self.past_kv_cache
             end = min(past_prompt_ids.shape[1], prompt_ids.shape[1])
             match = past_prompt_ids[:, :end] == past_prompt_ids[:, :end]
-            keep = end if match.all() else match.float().argmax().item()
-            prompt_ids[:, :keep] = past_prompt_ids[:, :keep]
+            keep = end if match.all() else match.float().argmin().item()
+            # prompt_ids[:, :keep] = past_prompt_ids[:, :keep]
             past_kv_cache.crop(keep)
             kv_cache = past_kv_cache
         else:

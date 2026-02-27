@@ -187,7 +187,7 @@ if __name__ == "__main__":
     lit_model.student.model.merge_and_unload(progressbar=True)
     lit_model.to(str_to_torch_dtype(args.dtype))
     lit_model.to('cuda')
-    lit_model.student = torch.compile(lit_model.student, mode="default")
+    # lit_model.student = torch.compile(lit_model.student, mode="default")
 
     if args.temperature > 0:
         do_sample = True

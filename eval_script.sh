@@ -53,7 +53,7 @@ CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python-spec -m evaluation.inference_eagle --
 CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python-spec -m evaluation.inference_eagle2 --ea-model-path $Eagle_PATH --base-model-path $Vicuna_PATH --model-id ${MODEL_NAME}-eagle2-${torch_dtype} --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype
 # ImportError: cannot import name '_expand_mask' from 'transformers.models.llama.modeling_llama'
 CUDA_VISIBLE_DEVICES=${GPU_DEVICES} USE_LADE=1 python-specl -m evaluation.inference_lookahead --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-lade-level-5-win-7-guess-7-${torch_dtype} --level 5 --window 7 --guess 7 --bench-name $bench_NAME --dtype $torch_dtype
-# or (is_torchdynamo_compiling() or cache_position[-1] >= input_ids.shape[1]), TypeError: 'NoneType'
+# or (is_torchdynamo_compiling() or cache_position[-1] >= input_i  ds.shape[1]), TypeError: 'NoneType'
 CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python-specl -m evaluation.inference_pld --model-path $Vicuna_PATH --model-id ${MODEL_NAME}-pld-${torch_dtype} --bench-name $bench_NAME --dtype $torch_dtype
 #! Mean accepted tokens:  3.248735244519393
 CUDA_VISIBLE_DEVICES=${GPU_DEVICES} python-spec -m evaluation.inference_hydra --model-path $Hydra_PATH --base-model $Vicuna_PATH --model-id ${MODEL_NAME}-hydra-${torch_dtype} --bench-name $bench_NAME --temperature $TEMP --dtype $torch_dtype
