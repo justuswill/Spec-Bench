@@ -229,11 +229,10 @@ class ParallelSamplingLightningModule(LightningModule):
         # remove additional tokens if top_p is more restrictive
         remove = (top_k_probs.cumsum(dim=-1) - top_k_probs) > self.top_p
         top_k_probs = top_k_probs.masked_fill(remove, 0.0)
-        # renormalize and scatter back to vocab size
+        # renormalize; sort by token index so CDF bins match vocab-sorted original
         top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
-        p.zero_()
-        p.scatter_(-1, top_k_indices, top_k_probs)
-        return p
+        sort_idx = top_k_indices.argsort(dim=-1)
+        return top_k_probs.gather(-1, sort_idx), top_k_indices.gather(-1, sort_idx)
 
     def batch_from_teacher_scores(self, batch):
         """
@@ -1063,7 +1062,6 @@ class ParallelSamplingLightningModule(LightningModule):
             else:
                 lam = float(A[A_idx[R - 1]] * (H[M] - H[M - 1]))
             B = torch.argmax(AH - lam * self.arange_tpscp1[None, :], dim=1)
-            print(B.sum())
 
             # --- Greedy correction ---
             # B = B.clone()
@@ -1200,7 +1198,7 @@ class ParallelSamplingLightningModule(LightningModule):
                 full_logits[:, :pos] = full_logits[:, :pos] / self.temperature
             full_p = torch.softmax(full_logits, dim=-1)
             student_p = full_p[:, pos:]
-            tgt_p = self.adapt_p(full_p[:, :pos])
+            tgt_p, tgt_indices = self.adapt_p(full_p[:, :pos])
             student_predicted = student_logits.argmax(dim=-1)
             student_p_max = student_p.gather(-1, student_predicted[..., None])[..., 0]
 
@@ -1208,11 +1206,12 @@ class ParallelSamplingLightningModule(LightningModule):
             if n_verify > 0:
                 # assert n_verify == tgt_logits.shape[1] - 1
                 # with record_function("loop: verify + accept"):
-                right_bin_edges = tgt_p.cumsum(dim=-1)
+                right_bin_edges = tgt_p.cumsum(dim=-1)  # [1, n_verify+1, top_k]
                 right_bin_edges[..., -1] = 1
                 z_idx = max_new_tokens - tokens_to_verify
                 z_rnd = z_rnd_all[:, z_idx:z_idx + n_verify + 1]
-                correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+                bin_idx = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+                correct_tokens = tgt_indices.gather(-1, bin_idx.unsqueeze(-1)).squeeze(-1)
                 check_tokens = correct_tokens[:, :-1]
                 predict_tokens = prompt_ids[..., - n_verify:]
                 matches = (predict_tokens == check_tokens)
