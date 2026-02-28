@@ -32,7 +32,7 @@ USE_LADE=1 python-specl -m evaluation.inference_lookahead --model-path lmsys/vic
 python-specl -m evaluation.inference_pld --model-path lmsys/vicuna-7b-v1.3 --model-id vicuna-7b-v1.3-pld-float16-m5-1 --bench-name spec_bench --dtype float16
 python-specl -m evaluation.inference_pld --model-path lmsys/vicuna-7b-v1.3 --model-id vicuna-7b-v1.3-pld-float16-m5-2 --bench-name spec_bench --dtype float16
 python-specl -m evaluation.inference_pld --model-path lmsys/vicuna-7b-v1.3 --model-id vicuna-7b-v1.3-pld-float16-m5-3 --bench-name spec_bench --dtype float16
-# HYDRA       MAT: 3.5637,
+# HYDRA       MAT: 3.5637
 python-specl -m evaluation.inference_hydra --model-path ankner/hydra-vicuna-7b-v1.3 --base-model lmsys/vicuna-7b-v1.3 --model-id vicuna-7b-v1.3-hydra-float16-temp-0.7-m5-1 --bench-name spec_bench --temperature 0.7 --dtype float16
 python-specl -m evaluation.inference_hydra --model-path ankner/hydra-vicuna-7b-v1.3 --base-model lmsys/vicuna-7b-v1.3 --model-id vicuna-7b-v1.3-hydra-float16-temp-0.7-m5-2 --bench-name spec_bench --temperature 0.7 --dtype float16
 python-specl -m evaluation.inference_hydra --model-path ankner/hydra-vicuna-7b-v1.3 --base-model lmsys/vicuna-7b-v1.3 --model-id vicuna-7b-v1.3-hydra-float16-temp-0.7-m5-3 --bench-name spec_bench --temperature 0.7 --dtype float16

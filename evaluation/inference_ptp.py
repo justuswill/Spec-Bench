@@ -56,29 +56,46 @@ def ptp_test(inputs, model):
     print(timed, new_token / timed, 1000 * timed / new_token)
     return output_ids, new_token, step, accept_length_list
 
+_profiler_done = 6
+
 def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temperature=0.0):
+    global _profiler_done
     model.temperature = temperature
     # return ptp_test()
 
-    import time
-    s = time.time()
-    # metrics = model.generate_old(
-    metrics = model.generate(
-    # metrics=model.generate_tree(
-        {'prompt_ids': inputs.input_ids},
-        max_new_tokens=max_new_tokens,
-        return_metrics=True,
-        eos=tokenizer.eos_token_id,
-        # gated=True,
-        # correcting_via='u',
-        # collect_stats=True
-    )[1]
+    # import time
+    # from torch.profiler import profile, record_function, ProfilerActivity
+    # s = time.time()
+
+    def _run():
+        # metrics = model.generate_old(
+        return model.generate(
+        # return model.generate_tree(
+            {'prompt_ids': inputs.input_ids},
+            max_new_tokens=max_new_tokens,
+            return_metrics=True,
+            eos=tokenizer.eos_token_id,
+            # gated=True,
+            # correcting_via='u',
+            # collect_stats=True
+        )[1]
+
+    # if _profiler_done == 0:
+    #     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+    #         with record_function("generate"):
+    #             metrics = _run()
+    #     prof.export_chrome_trace("profile_trace.json")
+    #     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
+    #     _profiler_done -= 1
+    # else:
+    metrics = _run()
+    #     _profiler_done -= 1
     output_ids = metrics['completion']
     step = metrics['num_calls']
     accept_length_list = metrics['correct_all']
     new_token = sum(accept_length_list)
     # torch.cuda.synchronize()
-    timed = time.time() - s
+    # timed = time.time() - s
 
     # global STPS
     # STPS += [metrics['STP']]
