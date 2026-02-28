@@ -8,44 +8,60 @@ import argparse
 import torch.cuda
 from fastchat.utils import str_to_torch_dtype
 from pandas.core.dtypes.inference import is_number
+from scipy.signal import max_len_seq
 
 from evaluation.eval import run_eval, reorg_answer_file
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
 from transformers.cache_utils import DynamicCache
+import math
 
 
 def baseline_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, do_sample=False):
     input_ids = inputs.input_ids
     import time
     s = time.time()
+
     # output_ids = model.generate(
     #     input_ids,
     #     do_sample=do_sample,
     #     temperature=temperature,
     #     max_new_tokens=max_new_tokens,
     # )
+
     timing = {'call': []}
-    past_key_values = None
+    kv_cache = StaticCache(model.config, batch_size=1, max_cache_len=2048)
     generated = input_ids
+    input_ids = generated[:, :-1]
+    raw_len = input_ids.shape[1]
+    padded_len = 1 << ((raw_len - 1).bit_length() if raw_len > 1 else 0)
+    if padded_len > raw_len:
+        input_ids = torch.cat([input_ids, input_ids.new_full((1, padded_len - raw_len), 13)], dim=1)
+    outputs = model(
+        input_ids=input_ids,
+        past_key_values=kv_cache,
+        use_cache=True
+    )
+    kv_cache.crop(generated.shape[1] - 1)
+    kv_cache = outputs.past_key_values
     for step in range(max_new_tokens):
         scall = time.time()
+        torch.compiler.cudagraph_mark_step_begin()
         outputs = model(
-            input_ids=generated[:, -1:] if past_key_values is not None else generated,
-            past_key_values=past_key_values,
+            input_ids=generated[:, -1:],
+            past_key_values=kv_cache,
             use_cache=True,
         )
+        kv_cache = outputs.past_key_values
         timing['call'] += [time.time() - scall]
         logits = outputs.logits[:, -1, :]
-        past_key_values = outputs.past_key_values
         if temperature > 0.0:
-            next_token = torch.distributions.Categorical(logits=logits / temperature).sample()
+            next_token = torch.distributions.Categorical(logits=logits / temperature).sample()[None, :]
         else:
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
         generated = torch.cat([generated, next_token], dim=-1)
         if next_token.item() == tokenizer.eos_token_id:
            break
-
     output_ids = generated
 
     torch.cuda.synchronize()
@@ -132,10 +148,18 @@ if __name__ == "__main__":
         args.model_path,
         torch_dtype=str_to_torch_dtype(args.dtype),
         low_cpu_mem_usage=True,
-        device_map="auto"
     )
+    torch.set_float32_matmul_precision('high')
+    model.to('cuda')
+    model.eval()
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+    # torch._dynamo.config.suppress_errors = False
+    # torch._dynamo.config.verbose = True
+    # model.generation_config.cache_implementation = "static"
+    # model = torch.compile(model, mode='reduce-overhead', dynamic=False, fullgraph=True)
+    model = torch.compile(model, mode='default', dynamic=True, fullgraph=False)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=False)
 
     if args.temperature > 0:
         do_sample = True

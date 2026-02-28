@@ -79,15 +79,15 @@ def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temper
             # collect_stats=True
         )[1]
 
-    if _profiler_done == 0:
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, with_stack=True) as prof:
-            with record_function("generate"):
-                metrics = _run()
-        prof.export_chrome_trace("profile_trace.json")
-        print(prof.key_averages(group_by_stack_n=5).table(sort_by="cpu_time_total", row_limit=30))
-    else:
-        metrics = _run()
-        _profiler_done -= 1
+    # if _profiler_done == 0:
+    #     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, with_stack=True) as prof:
+    #         with record_function("generate"):
+    #             metrics = _run()
+    #     prof.export_chrome_trace("profile_trace.json")
+    #     print(prof.key_averages(group_by_stack_n=5).table(sort_by="cpu_time_total", row_limit=30))
+    # else:
+    metrics = _run()
+    #     _profiler_done -= 1
     output_ids = metrics['completion']
     step = metrics['num_calls']
     accept_length_list = metrics['correct_all']
@@ -198,11 +198,13 @@ if __name__ == "__main__":
     # lit_model.teacher.eval()
     lit_model.student.eval()
     # Fixed number of tokens per call, optimizing kernels
-    lit_model.student.set_gate_window(200)
+    lit_model.student.set_gate_window(90)
     lit_model.student.model.merge_and_unload(progressbar=True)
     lit_model.to(str_to_torch_dtype(args.dtype))
     lit_model.to('cuda')
     lit_model.student = torch.compile(lit_model.student, mode="default")
+    # lit_model.student = torch.compile(lit_model.student, mode="reduce-overhead", fullgraph=True)
+    # lit_model.student_prefill = torch.compile(lit_model.student, dynamic=True, fullgraph=True)
 
     if args.temperature > 0:
         do_sample = True

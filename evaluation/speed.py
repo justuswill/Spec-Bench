@@ -180,7 +180,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--file-path",
-        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-g100_rho0.1.jsonl',
+        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-g70+p.jsonl',
         # default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-float16-temp-0.7-m5-1.jsonl',
         # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-sps-68m-float16-temp-0.7-m5.jsonl',
         # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-medusa-float16-temp-0.7-m5.jsonl',

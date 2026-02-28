@@ -82,8 +82,8 @@ def get_model_answers(
         **kwargs,
 ):
 
-    model.eval()
-    print('Check model training state:', model.training)
+    # model.eval()
+    # print('Check model training state:', model.training)
 
     cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
     print('CUDA VISIBLE DEVICES:', cuda_visible_devices)
