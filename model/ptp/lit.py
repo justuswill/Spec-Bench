@@ -54,14 +54,14 @@ class ParallelSamplingLightningModule(LightningModule):
         # Optimized inference
         self.past_kv_cache = None
         self.ones_tpsc = torch.ones([1, self.tokens_per_student_call], dtype=int, device=device)
-        self.arange_tpscp1 = torch.arange(self.tokens_per_student_call + 1, device=device)
-        self.arange_21 = torch.arange(21, device=device)
-        self.inf = torch.tensor(float('inf'), device=device)
+        self.arange_tpscp1 = torch.arange(self.tokens_per_student_call + 1)
+        self.arange_21 = torch.arange(21)
+        self.inf = torch.tensor(float('inf'))
 
         Y = np.load('data/Y.npy')
         YY = Y.argmin(axis=1)
         YY[Y.all(axis=1)] = 20
-        self.hist_base = torch.tensor(np.unique(YY, return_counts=True)[1] / YY.shape[0], device=device)
+        self.hist_base = torch.tensor(np.unique(YY, return_counts=True)[1] / YY.shape[0])
     
     def configure_model(self) -> None:
         if self.student is None:
@@ -1000,12 +1000,12 @@ class ParallelSamplingLightningModule(LightningModule):
         if student_p is None:
             A = self.hist_base
             if n_verify is not None:
-                A = torch.cat([A[:n_verify], torch.tensor([A[n_verify:].sum()], device=device)])
+                A = torch.cat([A[:n_verify], torch.tensor([A[n_verify:].sum()])])
         else:
             # assert student_p.shape[1] == n_verify
-            A = torch.ones(student_p.shape[1] + 1, device=device)
-            A[1:] = torch.cumprod(student_p[0], dim=-1)
-            A[:-1] *= 1 - student_p[0]
+            A = torch.ones(student_p.shape[1] + 1)
+            A[1:] = torch.cumprod(student_p[0].cpu(), dim=-1)
+            A[:-1] *= 1 - student_p[0].cpu()
         # Reward; Estimated # correct tokens in the next step given k proposed tokens
         H_hist = torch.cumsum(self.hist_base * self.arange_21, dim=-1)
         # or: # proposed tokens
@@ -1015,8 +1015,9 @@ class ParallelSamplingLightningModule(LightningModule):
         #     rho = np.clip((np.array(metrics['Nrel']).mean() - 0.2) / 0.2, 0, 1)
         # else:
         #     rho = 0
-        rho = 0.5
+        rho = 0.1
         H = (1 - rho) * H_hist + rho * H_count
+        A = A.clip(min=0.05)
 
         M = self.tokens_per_student_call
         AH = A[:, None] * H[None, :M + 1]  # [n_pos, M+1]
@@ -1030,7 +1031,7 @@ class ParallelSamplingLightningModule(LightningModule):
                 lam = torch.sum(A * H[B]) / (1 + B.sum() / double_at)
                 if (lam_pre == lam).all():
                     break
-            return B
+            return B.tolist()
         else:
             num_tokens = min(num_tokens, M * A.shape[0])
 
@@ -1072,7 +1073,7 @@ class ParallelSamplingLightningModule(LightningModule):
                 B[idx] += 1
                 total += 1
 
-            return B
+            return B.tolist()
 
     @torch.inference_mode()
     def generate(self, batch, max_new_tokens, return_metrics=False, eos=None,
@@ -1095,6 +1096,7 @@ class ParallelSamplingLightningModule(LightningModule):
         metrics = {'correct': [], 'N': [], 'Nrel': []}
         timing = {'step': [], 'call': []}
         import time
+        from torch.profiler import record_function
 
         # If we use a fixed number of proposed tokens, the Gated LoRA layers are already set
         num_proposed_tokens = GatedLinearLora.GATE_WINDOW if fixed_tokens else None
@@ -1104,7 +1106,7 @@ class ParallelSamplingLightningModule(LightningModule):
         tokens_to_verify = max_new_tokens
         z_rnd_all = torch.rand([prompt_ids.shape[0], max_new_tokens + self.tokens_per_student_call + (num_proposed_tokens if fixed_tokens else 0)], device=device, dtype=torch.float32)
         if fixed_tokens:
-            n_props = torch.tensor((num_proposed_tokens // self.tokens_per_student_call) * [self.tokens_per_student_call] + [(num_proposed_tokens % self.tokens_per_student_call)] + self.tokens_per_student_call * [0], device=device)[:self.tokens_per_student_call]
+            n_props = ((num_proposed_tokens // self.tokens_per_student_call) * [self.tokens_per_student_call] + [(num_proposed_tokens % self.tokens_per_student_call)] + self.tokens_per_student_call * [0])[:self.tokens_per_student_call]
         else:
             n_props = self.proposals(n_verify=0, num_tokens=num_proposed_tokens)
 
@@ -1142,116 +1144,109 @@ class ParallelSamplingLightningModule(LightningModule):
         # timing['call'] += [time.time() - scall]
 
         while tokens_to_verify > 0:
-            # s = time.time()
-            if not fixed_tokens:
-                n_props = torch.clip(n_props, max=torch.arange(tokens_to_verify, tokens_to_verify - n_props.shape[0], -1, device=device, dtype=int))
-                n_props = torch.clip(n_props, min=0)
-            # todo is this really better to avoid syncs?
-            n_props = [n_prop.item() for n_prop in n_props.cpu()]
+            with record_function("loop: n_props cpu sync"):
+                if not fixed_tokens:
+                    n_props = [min(n, max(0, tokens_to_verify - d)) for d, n in enumerate(n_props)]
             n_verify = tokens_to_verify - tokens_to_fill
             # assert n_verify == len(n_props) - 1
             seq_len = prompt_ids.shape[1] + sum(n_props)
             pos = prompt_ids.shape[1] - kv_cache.get_seq_length()
             metrics['N'] += [pos + sum(n_props)]
 
-            # Prepare inputs
-            z_idx = max_new_tokens - tokens_to_verify
-            z_rnd = torch.cat([z_rnd_all[:, z_idx + d:z_idx + d + n_prop] for d, n_prop in enumerate(n_props)], dim=1)
-            input_ids = prompt_ids[:, kv_cache.get_seq_length():]
-            midx = pos
-            # todo pre-allocate buffer space for inputs
-            input_mask = torch.tril(torch.ones(seq_len - kv_cache.get_seq_length(), seq_len, device=device), diagonal=kv_cache.get_seq_length())
-            input_position_ids = torch.arange(kv_cache.get_seq_length(), seq_len, device=device)[None, :]
-            for d, n_prop in enumerate(n_props):
-                input_mask[midx: midx + n_prop, prompt_ids.shape[1] - n_verify + d:kv_cache.get_seq_length() + midx] = 0
-                input_position_ids[:, midx: midx + n_prop] -= midx - pos + n_verify - d + 1
-                midx += n_prop
-            input_mask = (1 - input_mask[None, None, :, :].to(torch.float16)) * -1e15
+            with record_function("loop: prepare inputs"):
+                # Prepare inputs
+                z_idx = max_new_tokens - tokens_to_verify
+                z_rnd = torch.cat([z_rnd_all[:, z_idx + d:z_idx + d + n_prop] for d, n_prop in enumerate(n_props)], dim=1)
+                input_ids = prompt_ids[:, kv_cache.get_seq_length():]
+                midx = pos
+                # todo pre-allocate buffer space for inputs
+                input_mask = torch.tril(torch.ones(seq_len - kv_cache.get_seq_length(), seq_len, device=device), diagonal=kv_cache.get_seq_length())
+                input_position_ids = torch.arange(kv_cache.get_seq_length(), seq_len, device=device)[None, :]
+                for d, n_prop in enumerate(n_props):
+                    input_mask[midx: midx + n_prop, prompt_ids.shape[1] - n_verify + d:kv_cache.get_seq_length() + midx] = 0
+                    input_position_ids[:, midx: midx + n_prop] -= midx - pos + n_verify - d + 1
+                    midx += n_prop
+                input_mask = (1 - input_mask[None, None, :, :].to(torch.float16)) * -1e15
 
-            # Student proposals
-            # scall = time.time()
-            if not fixed_tokens:
-                self.student.set_gate_window(sum(n_props))
-            # outputs = TransformerModel.forward(self.student,
-            # torch.cuda.synchronize()
-            outputs = self.student(
-                input_ids=input_ids,
-                attention_mask=input_mask,
-                position_ids=input_position_ids,
-                auxiliaries=z_rnd,
-                past_key_values=kv_cache,
-                use_cache=True
-            )
-            # torch.cuda.synchronize()
-            # timing['call'] += [time.time() - scall]
+            with record_function("loop: student forward"):
+                # Student proposals
+                if not fixed_tokens:
+                    self.student.set_gate_window(sum(n_props))
+                outputs = self.student(
+                    input_ids=input_ids,
+                    attention_mask=input_mask,
+                    position_ids=input_position_ids,
+                    auxiliaries=z_rnd,
+                    past_key_values=kv_cache,
+                    use_cache=True
+                )
 
-            kv_cache = outputs.past_key_values
-            full_logits = outputs.logits
-            student_logits = full_logits[:, pos:]
-            # tgt_logits
-            if self.temperature is not None and self.temperature != 1.0:
-                full_logits[:, :pos] = full_logits[:, :pos] / self.temperature
-            full_p = torch.softmax(full_logits, dim=-1)
-            student_p = full_p[:, pos:]
-            tgt_p = self.adapt_p(full_p[:, :pos])
-            # idx_p_sorted = student_p.argsort(descending=True, dim=-1)
-            # O-PTP
-            student_predicted = student_logits.argmax(dim=-1)
-            student_p_max = student_p.gather(-1, student_predicted[..., None])[..., 0]
+            with record_function("loop: post-forward logits"):
+                kv_cache = outputs.past_key_values
+                full_logits = outputs.logits
+                student_logits = full_logits[:, pos:]
+                if self.temperature is not None and self.temperature != 1.0:
+                    full_logits[:, :pos] = full_logits[:, :pos] / self.temperature
+                full_p = torch.softmax(full_logits, dim=-1)
+                student_p = full_p[:, pos:]
+                tgt_p = self.adapt_p(full_p[:, :pos])
+                student_predicted = student_logits.argmax(dim=-1)
+                student_p_max = student_p.gather(-1, student_predicted[..., None])[..., 0]
 
             # Verify last speculated tokens
             if n_verify > 0:
                 # assert n_verify == tgt_logits.shape[1] - 1
                 # todo let adapt_p return cumsum directly
-                right_bin_edges = tgt_p.cumsum(dim=-1)
-                right_bin_edges[..., -1] = 1
-                z_idx = max_new_tokens - tokens_to_verify
-                z_rnd = z_rnd_all[:, z_idx:z_idx + n_verify + 1]
-                correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
-                check_tokens = correct_tokens[:, :-1]
-                predict_tokens = prompt_ids[..., - n_verify:]
-                matches = (predict_tokens == check_tokens)
-                num_correct = matches.float().argmin(dim=1)
-                num_correct[matches.all(dim=1)] = n_verify
-                num_correct = int(num_correct[0])
-                num_new = num_correct + 1
-                tokens_to_verify -= num_correct
-                kv_cache.crop(prompt_ids.shape[-1] - (n_verify - num_correct))
-                prev_prop = sum(n_props[:num_correct])
-                ths_student_predicted = student_predicted[:, prev_prop: prev_prop + n_props[num_correct]]
-                ths_student_p = student_p_max[:, prev_prop: prev_prop + n_props[num_correct]]
-                metrics['Nrel'] += [num_correct / n_verify]
-                # Verify first speculated and add other speculated tokens
-                if fixed_tokens and ths_student_predicted.shape[1] < self.tokens_per_student_call:
-                    # Pad with linbebreaks
-                    ths_student_predicted = torch.cat([ths_student_predicted, pad_token * self.ones_tpsc[:, :self.tokens_per_student_call - ths_student_predicted.shape[1]]], dim=1)
-                    ths_student_p = torch.cat([ths_student_p, pad_token * self.ones_tpsc[:, :self.tokens_per_student_call - ths_student_p.shape[1]]], dim=1)
-                if ths_student_predicted.shape[1] == 0:
-                    match = False
-                else:
-                    ths_student_predicted[0, 0] = correct_tokens[0, num_correct]
-                    match = ths_student_predicted[0, 0] == correct_tokens[0, num_correct]
-                if not match:
-                    # Discard speculated tokens
-                    prompt_ids = torch.cat([
-                        prompt_ids[:, :prompt_ids.shape[1] - n_verify],
-                        correct_tokens[:, :num_correct + 1],
-                    ], dim=1)
-                    tokens_to_verify -= 1
-                    tokens_to_fill = tokens_to_verify
-                    n_props = self.proposals(n_verify=0, num_tokens=num_proposed_tokens, metrics=metrics)
-                else:
-                    # Add new speculated tokens
-                    prompt_ids = torch.cat([
-                        prompt_ids[:, :prompt_ids.shape[1] - (n_verify - num_correct)],
-                        ths_student_predicted,
-                    ], dim=1)
-                    tokens_to_fill = tokens_to_verify - ths_student_predicted.shape[1]
-                    tokens_to_verify -= 1
-                    n_props = self.proposals(student_p=ths_student_p[:, 1:], num_tokens=num_proposed_tokens, metrics=metrics)
-                metrics['correct'] += [num_new]
-                if eos in correct_tokens[:, :num_correct + 1]:
-                    break
+                with record_function("loop: verify + accept"):
+                    right_bin_edges = tgt_p.cumsum(dim=-1)
+                    right_bin_edges[..., -1] = 1
+                    z_idx = max_new_tokens - tokens_to_verify
+                    z_rnd = z_rnd_all[:, z_idx:z_idx + n_verify + 1]
+                    correct_tokens = (right_bin_edges > z_rnd[..., None]).max(dim=-1).indices
+                    check_tokens = correct_tokens[:, :-1]
+                    predict_tokens = prompt_ids[..., - n_verify:]
+                    matches = (predict_tokens == check_tokens)
+                    num_correct = matches.float().argmin(dim=1)
+                    num_correct[matches.all(dim=1)] = n_verify
+                    num_correct = int(num_correct[0])
+                    num_new = num_correct + 1
+                    tokens_to_verify -= num_correct
+                    kv_cache.crop(prompt_ids.shape[-1] - (n_verify - num_correct))
+                    prev_prop = sum(n_props[:num_correct])
+                    ths_student_predicted = student_predicted[:, prev_prop: prev_prop + n_props[num_correct]]
+                    ths_student_p = student_p_max[:, prev_prop: prev_prop + n_props[num_correct]]
+                    metrics['Nrel'] += [num_correct / n_verify]
+                    # Verify first speculated and add other speculated tokens
+                    if fixed_tokens and ths_student_predicted.shape[1] < self.tokens_per_student_call:
+                        # Pad with linbebreaks
+                        ths_student_predicted = torch.cat([ths_student_predicted, pad_token * self.ones_tpsc[:, :self.tokens_per_student_call - ths_student_predicted.shape[1]]], dim=1)
+                        ths_student_p = torch.cat([ths_student_p, pad_token * self.ones_tpsc[:, :self.tokens_per_student_call - ths_student_p.shape[1]]], dim=1)
+                    if ths_student_predicted.shape[1] == 0:
+                        match = False
+                    else:
+                        ths_student_predicted[0, 0] = correct_tokens[0, num_correct]
+                        match = ths_student_predicted[0, 0] == correct_tokens[0, num_correct]
+                    if not match:
+                        # Discard speculated tokens
+                        prompt_ids = torch.cat([
+                            prompt_ids[:, :prompt_ids.shape[1] - n_verify],
+                            correct_tokens[:, :num_correct + 1],
+                        ], dim=1)
+                        tokens_to_verify -= 1
+                        tokens_to_fill = tokens_to_verify
+                        n_props = self.proposals(n_verify=0, num_tokens=num_proposed_tokens, metrics=metrics)
+                    else:
+                        # Add new speculated tokens
+                        prompt_ids = torch.cat([
+                            prompt_ids[:, :prompt_ids.shape[1] - (n_verify - num_correct)],
+                            ths_student_predicted,
+                        ], dim=1)
+                        tokens_to_fill = tokens_to_verify - ths_student_predicted.shape[1]
+                        tokens_to_verify -= 1
+                        n_props = self.proposals(student_p=ths_student_p[:, 1:], num_tokens=num_proposed_tokens, metrics=metrics)
+                    metrics['correct'] += [num_new]
+                    if eos in correct_tokens[:, :num_correct + 1]:
+                        break
             else:
                 # Only relevant if fixed_tokens=False and we don't force correct tokens
                 raise NotImplementedError
@@ -1374,14 +1369,14 @@ class ParallelSamplingLightningModule(LightningModule):
             A = self.hist_base
             if verify_tree is not None:
                 n_verify = verify_tree[:, 2].max().item() if verify_tree.shape[0] > 0 else 0
-                A = torch.cat([A[:n_verify], torch.tensor([A[n_verify:].sum()], device=device)])
+                A = torch.cat([A[:n_verify], torch.tensor([A[n_verify:].sum()])])
         else:
             # assert student_p.shape[1] == n_verify
             # todo properly use verify_tree
             student_p = student_p[0:, :student_p.shape[1] // 2]
-            A = torch.ones(student_p.shape[1] + 1, device=device)
-            A[1:] = torch.cumprod(student_p[0], dim=-1)
-            A[:-1] *= 1 - student_p[0]
+            A = torch.ones(student_p.shape[1] + 1)
+            A[1:] = torch.cumprod(student_p[0].cpu(), dim=-1)
+            A[:-1] *= 1 - student_p[0].cpu()
         # Reward; Estimated # correct tokens in the next step given k proposed tokens
         H_hist = torch.cumsum(self.hist_base * torch.arange(21, device=device), dim=-1)
         # or: # proposed tokens

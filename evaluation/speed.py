@@ -180,7 +180,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--file-path",
-        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-debug.jsonl',
+        default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-g100_rho0.1.jsonl',
         # default='../data/spec_bench/model_answer/vicuna-7b-v1.5-ptp-float16-temp-0.7-m5-1.jsonl',
         # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-sps-68m-float16-temp-0.7-m5.jsonl',
         # default='../data/spec_bench/model_answer/vicuna-7b-v1.3-medusa-float16-temp-0.7-m5.jsonl',
@@ -198,6 +198,7 @@ if __name__ == "__main__":
         "--base-path",
         # default='../data/spec_bench/model_answer/vicuna-7b-v1.5-vanilla-float16-temp-0.7-m5.jsonl',
         default='../data/spec_bench/model_answer/vicuna-7b-v1.3-vanilla-float16-temp-0.7-m5-1.jsonl',
+        # default='../data/spec_bench/old/vicuna-7b-vanilla-float16-temp-0.7-m6.jsonl',
         type=str,
         help="The file path of evaluated baseline.",
     )
