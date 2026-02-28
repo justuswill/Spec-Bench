@@ -7,6 +7,7 @@ import argparse
 
 import torch.cuda
 from fastchat.utils import str_to_torch_dtype
+from pandas.core.dtypes.inference import is_number
 
 from evaluation.eval import run_eval, reorg_answer_file
 
@@ -37,7 +38,10 @@ def baseline_forward(inputs, model, tokenizer, max_new_tokens, temperature=0.0, 
         timing['call'] += [time.time() - scall]
         logits = outputs.logits[:, -1, :]
         past_key_values = outputs.past_key_values
-        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        if temperature > 0.0:
+            next_token = torch.distributions.Categorical(logits=logits / temperature).sample()
+        else:
+            next_token = torch.argmax(logits, dim=-1, keepdim=True)
         generated = torch.cat([generated, next_token], dim=-1)
         if next_token.item() == tokenizer.eos_token_id:
            break
@@ -153,6 +157,7 @@ if __name__ == "__main__":
         num_gpus_total=args.num_gpus_total,
         temperature=args.temperature,
         do_sample=do_sample,
+        seed_shift = 1000 * int(args.model_id[-1]) if args.model_id[-1].isdigit() else 0,
     )
 
     reorg_answer_file(answer_file)

@@ -384,19 +384,6 @@ class BinaryFloatEmbedding(torch.nn.Module):
     def __init__(self, embedding_dim):
         super().__init__()
         self.u_adapter = torch.nn.Linear(32, embedding_dim)
-        self.buffer = None
-
-    # def forward(self, u):
-    #     if self.buffer is None:
-    #         us = torch.linspace(0, 1, 2**8+1, device=u.device) + 2**9
-    #         res = us.to(torch.float32).view(torch.int32)
-    #         bit_masks = 2 ** torch.arange(31, -1, -1, device=u.device, dtype=torch.int32)
-    #         bits_tensor = ((res[..., None] & bit_masks[None, None, :]) != 0).int()
-    #         # assert torch.all(
-    #         #     u == (bits_tensor.to(torch.int32) * bit_masks[None, None, :]).sum(dim=2).to(torch.int32).view(torch.float32)
-    #         # )
-    #         self.buffer = self.u_adapter(bits_tensor.to(self.u_adapter.weight.dtype))
-    #     return torch.gather(self.buffer, dim=1, index=torch.floor(u * 2**8).to(int)[..., None].expand(-1, -1, 4096))
 
     def forward(self, u):
         res = u.to(torch.float32).view(torch.int32)
@@ -406,6 +393,20 @@ class BinaryFloatEmbedding(torch.nn.Module):
         #     u == (bits_tensor.to(torch.int32) * bit_masks[None, None, :]).sum(dim=2).to(torch.int32).view(torch.float32)
         # )
         return self.u_adapter(bits_tensor.to(self.u_adapter.weight.dtype))
+
+class BinaryFloatEmbeddingFast(torch.nn.Module):
+    def __init__(self, u_adapter):
+        super().__init__()
+        device = next(u_adapter.parameters()).device
+        us = (torch.linspace(0, 1, 2 ** 8 + 1, device=device) + 2 ** -9)[:-1]
+        res = us.to(torch.float32).view(torch.int32)
+        bit_masks = 2 ** torch.arange(31, -1, -1, device=device, dtype=torch.int32)
+        bits_tensor = ((res[..., None] & bit_masks[None, None, :]) != 0).int()
+        with torch.no_grad():
+            self.register_buffer('buffer', u_adapter(bits_tensor.to(u_adapter.weight.dtype)))
+
+    def forward(self, u):
+        return self.buffer[:, torch.floor(u * 2**8).to(int)[0], :]
 
 
 class SawtoothFloatEmbedding(torch.nn.Module):
@@ -452,8 +453,16 @@ class MixedTransformerModel(TransformerModel):
             raise ValueError(f"Unknown adapter_name {adapter_name}")
         self.u_adapter = adapter_class(self.model.config.hidden_size)
         self.shift_positions = shift_positions
+        self.ready = False
 
     def forward(self, input_ids: torch.LongTensor, auxiliaries: torch.FloatTensor, attention_mask=None, past_key_values=None, **kwargs):
+        if not self.ready:
+            for parent in self.modules():
+                for child_name, child in list(parent.named_children()):
+                    if isinstance(child, BinaryFloatEmbedding):
+                        setattr(parent, child_name, BinaryFloatEmbeddingFast(child.u_adapter))
+            self.ready = True
+
         # input_embeds = self.model.model.embed_tokens(input_ids)
         input_embeds = self.model.get_input_embeddings()(input_ids)
         auxiliary_embeds = self.u_adapter(auxiliaries)

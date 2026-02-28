@@ -78,6 +78,7 @@ def get_model_answers(
         answer_file,
         max_new_tokens,
         num_choices,
+        seed_shift=0,
         **kwargs,
 ):
 
@@ -162,7 +163,7 @@ def get_model_answers(
         choices = []
         for i in range(num_choices):
             cur_accept_lengths_tree = []
-            torch.manual_seed(i)
+            torch.manual_seed(seed_shift + i)
             conv = get_conversation_template("vicuna")
             turns = []
             steps = []

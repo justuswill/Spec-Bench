@@ -190,7 +190,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    args.model_id = args.model_id + "-temperature-" + str(args.temperature)
+    args.model_id = args.model_id
     args.tree_choices = eval(args.tree_choices)
 
     question_file = f"data/{args.bench_name}/question.jsonl"
@@ -233,6 +233,7 @@ if __name__ == "__main__":
         tree_choices=args.tree_choices,
         logits_processor=logits_processor,
         max_steps=args.max_steps,
+        seed_shift=1000 * int(args.model_id[-1]) if args.model_id[-1].isdigit() else 0,
     )
 
     reorg_answer_file(answer_file)

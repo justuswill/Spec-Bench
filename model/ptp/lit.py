@@ -1109,17 +1109,17 @@ class ParallelSamplingLightningModule(LightningModule):
             n_props = self.proposals(n_verify=0, num_tokens=num_proposed_tokens)
 
         # Fill caches
-        if self.past_kv_cache is not None and False:
+        if self.past_kv_cache is not None:
             past_prompt_ids, past_kv_cache = self.past_kv_cache
-            end = min(past_prompt_ids.shape[1], prompt_ids.shape[1])
-            match = past_prompt_ids[:, :end] == past_prompt_ids[:, :end]
+            end = min(prompt_ids.shape[1], past_prompt_ids.shape[1])
+            match = prompt_ids[:, :end] == past_prompt_ids[:, :end]
             keep = end if match.all() else match.float().argmin().item()
             # prompt_ids[:, :keep] = past_prompt_ids[:, :keep]
             past_kv_cache.crop(keep)
             kv_cache = past_kv_cache
         else:
             kv_cache = DynamicCache()
-        scall = time.time()
+        # scall = time.time()
         if not fixed_tokens:
             self.student.set_gate_window(0)
         # todo optimize teacher time
@@ -1135,14 +1135,14 @@ class ParallelSamplingLightningModule(LightningModule):
             kv_cache.crop(prompt_ids.shape[1] - 1)
             prompt_ids = torch.cat([
                 prompt_ids,
-                pad_token * self.ones_tpsc[:, :-1]
+                pad_token * self.ones_tpsc[:, :self.tokens_per_student_call - 1]
             ], dim=1)
             tokens_to_fill -= self.tokens_per_student_call - 1
         # torch.cuda.synchronize()
-        timing['call'] += [time.time() - scall]
+        # timing['call'] += [time.time() - scall]
 
         while tokens_to_verify > 0:
-            s = time.time()
+            # s = time.time()
             if not fixed_tokens:
                 n_props = torch.clip(n_props, max=torch.arange(tokens_to_verify, tokens_to_verify - n_props.shape[0], -1, device=device, dtype=int))
                 n_props = torch.clip(n_props, min=0)
@@ -1169,7 +1169,7 @@ class ParallelSamplingLightningModule(LightningModule):
             input_mask = (1 - input_mask[None, None, :, :].to(torch.float16)) * -1e15
 
             # Student proposals
-            scall = time.time()
+            # scall = time.time()
             if not fixed_tokens:
                 self.student.set_gate_window(sum(n_props))
             # outputs = TransformerModel.forward(self.student,
@@ -1183,7 +1183,7 @@ class ParallelSamplingLightningModule(LightningModule):
                 use_cache=True
             )
             # torch.cuda.synchronize()
-            timing['call'] += [time.time() - scall]
+            # timing['call'] += [time.time() - scall]
 
             kv_cache = outputs.past_key_values
             full_logits = outputs.logits
@@ -1298,11 +1298,9 @@ class ParallelSamplingLightningModule(LightningModule):
             #         break
 
             # torch.cuda.synchronize()
-            timing['step'] += [time.time() - s]
+            # timing['step'] += [time.time() - s]
 
-        print(1000 * np.mean(timing['call'][1:]), 1000 * timing['call'][0], 1000 * np.mean(timing['step']))
-
-        # print(1000 * np.mean(timing['step'][1:]), 1000 * np.mean(timing['call'][1:]))
+        # print(1000 * np.mean(timing['call'][1:]), 1000 * timing['call'][0], 1000 * np.mean(timing['step']))
         # plt.scatter(metrics['off'], metrics['offp'], s=2, alpha=0.5); plt.gca().set(xlabel='If the predicted token is wrong, the k-th one after is', ylabel='student confidence for actual correct token'); plt.show()
         metrics = {
             'completion': prompt_ids,

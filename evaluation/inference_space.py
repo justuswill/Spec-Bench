@@ -270,6 +270,7 @@ if __name__ == "__main__":
         num_gpus_total=args.num_gpus_total,
         temperature=args.temperature,
         do_sample=do_sample,
+        seed_shift=1000 * int(args.model_id[-1]) if args.model_id[-1].isdigit() else 0,
     )
 
     reorg_answer_file(answer_file)

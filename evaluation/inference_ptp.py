@@ -82,7 +82,7 @@ def ptp_forward(inputs, model, tokenizer, max_new_tokens, do_sample=True, temper
 
     # global STPS
     # STPS += [metrics['STP']]
-    print('%.2f #accept/step, %.2f ms/call' % (new_token / step, 1000 * timed / step))
+    # print('%.2f #accept/step, %.2f ms/call' % (new_token / step, 1000 * timed / step))
 
     return output_ids, new_token, step, accept_length_list
 
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--base-model-path",
         type=str,
-        required=True,
+        default=None,
     )
     parser.add_argument(
         "--student-path",
@@ -157,7 +157,7 @@ if __name__ == "__main__":
     if args.answer_file:
         answer_file = args.answer_file
     else:
-        answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}-float16-temp-0.7-lorag128_paper_fast.jsonl"
+        answer_file = f"data/{args.bench_name}/model_answer/{args.model_id}.jsonl"
 
     print(f"Output to {answer_file}")
 
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     lit_model.student.model.merge_and_unload(progressbar=True)
     lit_model.to(str_to_torch_dtype(args.dtype))
     lit_model.to('cuda')
-    # lit_model.student = torch.compile(lit_model.student, mode="default")
+    lit_model.student = torch.compile(lit_model.student, mode="default")
 
     if args.temperature > 0:
         do_sample = True
@@ -209,6 +209,7 @@ if __name__ == "__main__":
         num_gpus_total=args.num_gpus_total,
         temperature=args.temperature,
         do_sample=do_sample,
+        seed_shift=1000 * int(args.model_id[-1]) if args.model_id[-1].isdigit() else 0,
     )
 
     reorg_answer_file(answer_file)
